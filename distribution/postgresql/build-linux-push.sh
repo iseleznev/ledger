@@ -1,0 +1,1 @@
+docker buildx build --platform linux/amd64 -t selezneviyu/ledger_db:latest --push .

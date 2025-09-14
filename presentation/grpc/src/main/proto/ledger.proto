@@ -1,0 +1,343 @@
+syntax = "proto3";
+
+package ledger.v1;
+
+option java_package = "org.seleznyov.iyu.kfin.ledger.presentation.grpc.proto";
+option java_outer_classname = "LedgerProto";
+option java_multiple_files = true;
+
+import "google/protobuf/timestamp.proto";
+
+// Ledger service for transfer operations
+service LedgerService {
+  // Process transfer between accounts
+  rpc ProcessTransfer(TransferRequest) returns (TransferResponse);
+
+  // Get transfer status by transaction ID
+  rpc GetTransferStatus(TransferStatusRequest) returns (TransferResponse);
+
+  // Stream transfer events (for real-time monitoring)
+  rpc StreamTransferEvents(TransferEventRequest) returns (stream TransferEvent);
+}
+
+// Balance service for balance operations
+service BalanceService {
+  // Get account balance
+  rpc GetBalance(BalanceRequest) returns (BalanceResponse);
+
+  // Get detailed balance with breakdown
+  rpc GetDetailedBalance(BalanceRequest) returns (DetailedBalanceResponse);
+
+  // Batch balance inquiry
+  rpc GetBatchBalance(BatchBalanceRequest) returns (BatchBalanceResponse);
+}
+
+// Admin service for system management
+service AdminService {
+  // Get system statistics
+  rpc GetSystemStats(SystemStatsRequest) returns (SystemStatsResponse);
+
+  // Get account analysis
+  rpc GetAccountAnalysis(AccountAnalysisRequest) returns (AccountAnalysisResponse);
+
+  // Refresh account strategy
+  rpc RefreshAccountStrategy(RefreshStrategyRequest) returns (RefreshStrategyResponse);
+
+  // Create snapshot
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+
+  // Update system load
+  rpc UpdateSystemLoad(UpdateSystemLoadRequest) returns (UpdateSystemLoadResponse);
+
+  // Report false positive
+  rpc ReportFalsePositive(FalsePositiveRequest) returns (FalsePositiveResponse);
+}
+
+// ============================================================================
+// TRANSFER MESSAGES
+// ============================================================================
+
+// Transfer request message
+message TransferRequest {
+  string debit_account_id = 1;
+  string credit_account_id = 2;
+  int64 amount = 3;
+  string currency_code = 4;
+  string operation_date = 5; // ISO date format (optional)
+  string idempotency_key = 6; // Optional
+}
+
+// Transfer response message
+message TransferResponse {
+  string transaction_id = 1;
+  string idempotency_key = 2;
+  bool success = 3;
+  string message = 4;
+  string failure_reason = 5; // Only set if success = false
+  string processing_strategy = 6; // Only set if success = true
+  int64 processing_time_ms = 7;
+  google.protobuf.Timestamp timestamp = 8;
+}
+
+// Transfer status request
+message TransferStatusRequest {
+  string transaction_id = 1;
+}
+
+// Transfer event stream request
+message TransferEventRequest {
+  repeated string account_ids = 1; // Filter by accounts (optional)
+  bool include_system_events = 2;
+}
+
+// Transfer event message for streaming
+message TransferEvent {
+  string event_type = 1; // TRANSFER_STARTED, TRANSFER_COMPLETED, etc.
+  string transaction_id = 2;
+  string debit_account_id = 3;
+  string credit_account_id = 4;
+  int64 amount = 5;
+  string status = 6;
+  google.protobuf.Timestamp timestamp = 7;
+}
+
+// ============================================================================
+// BALANCE MESSAGES
+// ============================================================================
+
+// Balance request message
+message BalanceRequest {
+  string account_id = 1;
+  string operation_date = 2; // Optional, defaults to current date
+}
+
+// Balance response message
+message BalanceResponse {
+  string account_id = 1;
+  int64 balance = 2;
+  string operation_date = 3;
+  bool success = 4;
+  string message = 5;
+  string failure_reason = 6; // Only set if success = false
+  string processing_strategy = 7;
+  int64 query_time_ms = 8;
+  google.protobuf.Timestamp timestamp = 9;
+}
+
+// Detailed balance response with breakdown
+message DetailedBalanceResponse {
+  string account_id = 1;
+  string operation_date = 2;
+  bool success = 3;
+  string message = 4;
+  string failure_reason = 5; // Only set if success = false
+  BalanceBreakdown breakdown = 6; // Only set if success = true
+  int64 query_time_ms = 7;
+  google.protobuf.Timestamp timestamp = 8;
+}
+
+// Balance breakdown details
+message BalanceBreakdown {
+  int64 current_balance = 1;
+  int64 snapshot_balance = 2;
+  int64 delta_from_snapshot = 3;
+  int32 operations_count = 4;
+  string snapshot_date = 5; // ISO date format (empty if no snapshot)
+  bool has_snapshot = 6;
+}
+
+// Batch balance request
+message BatchBalanceRequest {
+  repeated string account_ids = 1;
+  string operation_date = 2; // Optional
+}
+
+// Batch balance response
+message BatchBalanceResponse {
+  repeated BalanceResult results = 1;
+  int32 total_accounts = 2;
+  int64 query_time_ms = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+// Single balance result in batch operation
+message BalanceResult {
+  string account_id = 1;
+  bool success = 2;
+  int64 balance = 3; // Only set if success = true
+  string message = 4;
+}
+
+// ============================================================================
+// ADMIN MESSAGES
+// ============================================================================
+
+// System stats request (empty message)
+message SystemStatsRequest {
+  // No fields needed
+}
+
+// System stats response
+message SystemStatsResponse {
+  LedgerStats ledger_stats = 1;
+  StrategyStats strategy_stats = 2;
+  SnapshotStats snapshot_stats = 3;
+  DetectionStats detection_stats = 4;
+  int32 tracked_accounts = 5;
+  google.protobuf.Timestamp timestamp = 6;
+}
+
+// Ledger processing statistics
+message LedgerStats {
+  ProcessingStats simple_stats = 1;
+  ProcessingStats disruptor_stats = 2;
+}
+
+// Individual processing strategy statistics
+message ProcessingStats {
+  string strategy = 1;
+  int64 processed_count = 2;
+  int64 failed_count = 3;
+  double average_processing_time_ms = 4;
+  // Additional fields for disruptor stats
+  int64 ring_buffer_size = 5;
+  int64 ring_buffer_used = 6;
+  int64 pending_operations = 7;
+}
+
+// Strategy selection statistics
+message StrategyStats {
+  int64 simple_assignments = 1;
+  int64 disruptor_assignments = 2;
+  int64 total_cached_assignments = 3;
+  int64 total_ml_detections = 4;
+  int64 false_positives = 5;
+  double false_positive_rate = 6;
+  google.protobuf.Timestamp last_updated = 7;
+}
+
+// Snapshot creation statistics
+message SnapshotStats {
+  ProcessingStats simple_stats = 1;
+  ProcessingStats disruptor_stats = 2;
+  int64 total_snapshots_created = 3;
+  int64 total_failed_creations = 4;
+}
+
+// ML detection statistics
+message DetectionStats {
+  int64 total_detections = 1;
+  int64 false_positives = 2;
+  double false_positive_rate = 3;
+  double current_burst_threshold = 4;
+  double current_short_threshold = 5;
+  double system_load_factor = 6;
+  int32 tracked_accounts = 7;
+}
+
+// Account analysis request
+message AccountAnalysisRequest {
+  string account_id = 1;
+}
+
+// Account analysis response
+message AccountAnalysisResponse {
+  string account_id = 1;
+  bool success = 2;
+  string message = 3;
+  StrategyAnalysis strategy_analysis = 4;
+  HotAccountAnalysis hot_account_analysis = 5;
+  MetricsSnapshot metrics_snapshot = 6;
+  google.protobuf.Timestamp timestamp = 7;
+}
+
+// Strategy analysis details
+message StrategyAnalysis {
+  string recommended_strategy = 1;
+  string cached_strategy = 2; // Optional
+  string strategy_reason = 3;
+  google.protobuf.Timestamp analysis_time = 4;
+}
+
+// Hot account ML analysis details
+message HotAccountAnalysis {
+  bool is_hot = 1;
+  string reason = 2;
+  double burst_score = 3;
+  double short_term_score = 4;
+  double ml_score = 5;
+  google.protobuf.Timestamp analysis_time = 6;
+}
+
+// Account metrics snapshot
+message MetricsSnapshot {
+  double burst_rate = 1; // Transactions per second in 5s window
+  double short_rate = 2; // Transactions per second in 1m window
+  double medium_rate = 3; // Transactions per second in 5m window
+  int64 total_transactions = 4;
+  int64 debit_count = 5;
+  int64 credit_count = 6;
+  int64 total_amount = 7;
+  int64 time_since_last_activity = 8; // Milliseconds
+  google.protobuf.Timestamp snapshot_time = 9;
+}
+
+// Refresh strategy request
+message RefreshStrategyRequest {
+  string account_id = 1;
+}
+
+// Refresh strategy response
+message RefreshStrategyResponse {
+  string account_id = 1;
+  bool success = 2;
+  string message = 3;
+  string new_strategy = 4; // Only set if success = true
+  google.protobuf.Timestamp timestamp = 5;
+}
+
+// Create snapshot request
+message CreateSnapshotRequest {
+  string account_id = 1;
+  string operation_date = 2; // Optional, defaults to current date
+}
+
+// Create snapshot response
+message CreateSnapshotResponse {
+  string account_id = 1;
+  string operation_date = 2;
+  bool success = 3;
+  string message = 4;
+  int64 balance = 5; // Only set if success = true
+  int32 operations_count = 6; // Only set if success = true
+  string failure_reason = 7; // Only set if success = false
+  google.protobuf.Timestamp timestamp = 8;
+}
+
+// Update system load request
+message UpdateSystemLoadRequest {
+  double load_factor = 1;
+}
+
+// Update system load response
+message UpdateSystemLoadResponse {
+  bool success = 1;
+  string message = 2;
+  double load_factor = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+// False positive report request
+message FalsePositiveRequest {
+  string account_id = 1;
+  string performance_description = 2;
+}
+
+// False positive report response
+message FalsePositiveResponse {
+  string account_id = 1;
+  bool success = 2;
+  string message = 3;
+  string performance_description = 4;
+  google.protobuf.Timestamp timestamp = 5;
+}

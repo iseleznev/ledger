@@ -1,0 +1,164 @@
+# Ledger System - Project Summary
+
+## Context
+Разработка высокопроизводительной системы двойной записи (double-entry bookkeeping) для финансовых операций с адаптивным выбором стратегии обработки и ML-детекцией горячих аккаунтов.
+
+## Tech Stack
+- **Java 24** с виртуальными потоками (Project Loom)
+- **Spring Boot 3.4.0** с поддержкой virtual threads
+- **PostgreSQL** с NamedParameterJdbcTemplate
+- **LMAX Disruptor** для высокопроизводительной обработки
+- **gRPC + REST API** для внешних интерфейсов
+- **Lombok** для генерации кода
+- **Maven** многомодульная структура
+
+## Архитектурные Решения
+
+### Dual Strategy Pattern
+**Холодные аккаунты (SIMPLE)**: PostgreSQL + Advisory locks на дебитовый счет
+**Горячие аккаунты (DISRUPTOR)**: LMAX Disruptor с account affinity + Write-Ahead Log
+
+### ML-Enhanced Detection
+- Sliding Windows (5 сек, 1 мин, 5 мин) с EWMA
+- 3-уровневая детекция: Burst (100ms) → Short-term (30s) → ML prediction (5 min)
+- Adaptive thresholds зависящие от системной нагрузки
+
+### Snapshot-Based Balance Optimization
+`current_balance = snapshot.balance + SUM(operations after snapshot)`
+- FULL OUTER JOIN для минимизации CTE
+- INCLUDE индексы для index-only scans
+
+### UUID7 с Race Condition Solution
+- Микросекундная точность в `generate_uuid_v7_precise()`
+- Ordering по `entry_ordinal` (BIGSERIAL), не по UUID
+
+## Структура Проекта
+
+```
+ledger/
+├── shared/                                    [ledger-shared]
+│   ├── utils/
+│   │   ├── UuidGenerator.java
+│   │   └── DateTimeUtil.java
+│   ├── constants/LedgerConstants.java
+│   └── validation/AmountValidator.java
+│
+├── domain/                                    [ledger-domain]
+│   ├── model/                                 [ledger-domain-model]
+│   │   ├── disruptor/WALEntry.java
+│   │   ├── entryrecord/EntryType.java
+│   │   ├── event/LedgerEvent.java
+│   │   └── snapshot/EntriesSnapshot.java
+│   │   └── ProcessingStrategy.java
+│   ├── exception/                             [ledger-domain-exception]
+│   │   ├── InsufficientFundsException.java
+│   │   ├── AccountNotFoundException.java
+│   │   └── ConcurrentOperationException.java
+│   ├── repository/                            [ledger-domain-repository]
+│   │   ├── LedgerRepository.java
+│   │   ├── SnapshotRepository.java
+│   │   └── WALRepository.java
+│   └── service/                               [ledger-domain-service]
+│       ├── BalanceCalculationService.java
+│       └── ValidationService.java
+│
+├── application/                               [ledger-application]
+│   ├── config/                                [ledger-application-config]
+│   │   ├── SnapshotConfiguration.java
+│   │   ├── TransactionConfig.java
+│   │   ├── HotAccountConfig.java
+│   │   ├── DisruptorConfig.java
+│   │   ├── MLDetectionConfig.java
+│   │   └── VirtualThreadsConfiguration.java
+│   ├── service/                               [ledger-application-service]
+│   │   ├── LedgerService.java                 # Main orchestration
+│   │   ├── AdaptiveStrategyService.java       # Strategy selection
+│   │   ├── SimpleLedgerService.java           # Cold accounts
+│   │   ├── DisruptorLedgerService.java        # Hot accounts
+│   │   ├── snapshot/
+│   │   │   ├── SimpleSnapshotService.java
+│   │   │   ├── DisruptorSnapshotService.java
+│   │   │   ├── AdaptiveSnapshotService.java
+│   │   │   └── ScheduledSnapshotService.java
+│   └── usecase/                               [ledger-application-usecase]
+│       ├── ProcessTransferUseCase.java
+│       ├── GetBalanceUseCase.java
+│       └── CreateSnapshotUseCase.java
+│
+├── infrastructure/                            [ledger-infrastructure]
+│   ├── detection/                             [ledger-infrastructure-detection]
+│   │   ├── MLEnhancedHotAccountDetector.java
+│   │   ├── SlidingWindowMetrics.java
+│   │   ├── AccountBehaviorModel.java
+│   │   ├── MLModelTrainer.java
+│   │   ├── AsyncMLMetricsCollector.java
+│   │   └── event/TransactionEvent.java
+│   ├── disruptor/                             [ledger-infrastructure-disruptor]
+│   │   ├── DisruptorManager.java              # Fixed TimeoutException
+│   │   ├── LedgerEventHandler.java
+│   │   ├── WALService.java
+│   │   ├── RecoveryService.java
+│   │   └── WALCleanupService.java
+│   ├── lock/                                  [ledger-infrastructure-lock]
+│   │   └── AdvisoryLockManager.java           # PostgreSQL advisory locks
+│   ├── monitoring/                            [ledger-infrastructure-monitoring]
+│   │   ├── MetricsCollector.java
+│   │   └── HealthCheckService.java
+│   └── persistence/
+│       ├── api/                               [ledger-infrastructure-persistence-api]
+│       │   ├── model/result/EntriesSummaryResult.java
+│       │   ├── repository/
+│       │   │   ├── AccountRepository.java
+│       │   │   ├── AdvisoryLockRepository.java
+│       │   │   ├── EntriesSnapshotRepository.java
+│       │   │   ├── EntryRecordRepository.java
+│       │   │   └── WALEntryRepository.java
+│       │   └── ApiApplication.java
+│       └── jdbc/                              [ledger-infrastructure-persistence-jdbc]
+│           ├── client/                        # 17 JDBC clients
+│           ├── repository/                    # 5 JDBC repositories
+│           ├── resources/db/                  # Liquibase migrations
+│           └── JdbcApplication.java
+│
+└── presentation/                              [ledger-presentation]
+    ├── rest/                                  [ledger-presentation-rest]
+    │   ├── controller/
+    │   │   ├── LedgerController.java
+    │   │   ├── BalanceController.java
+    │   │   └── AdminController.java
+    │   ├── dto/ (request/response)
+    │   ├── mapper/
+    │   └── RestApplication.java
+    └── grpc/                                  [ledger-presentation-grpc]
+        ├── proto/ledger.proto                 # gRPC definitions
+        ├── mapper/
+        │   ├── GrpcAdminMapper.java
+        │   ├── GrpcBalanceMapper.java
+        │   └── GrpcLedgerMapper.java
+        ├── service/
+        │   ├── GrpcAdminServiceImpl.java
+        │   ├── GrpcBalanceServiceImpl.java
+        │   └── GrpcLedgerServiceImpl.java
+        └── GrpcApplication.java
+```
+
+## Критические Исправления
+1. **DisruptorManager**: Заменен `com.lmax.disruptor.TimeoutException` на собственный `SnapshotTimeoutException`
+2. **Annotations**: Миграция `javax.annotation.*` → `jakarta.annotation.*`
+3. **Virtual Threads**: Интеграция через `Thread.ofVirtual()` и `Executors.newVirtualThreadPerTaskExecutor()`
+
+## Performance Targets
+- **Cold Accounts**: ~1000 ops/sec (2-5ms latency)
+- **Hot Accounts**: ~10,000+ ops/sec (sub-millisecond latency)
+- **Balance Queries**: Index-only scans (~0.5ms)
+- **Concurrent Processing**: Thousands of parallel requests via virtual threads
+
+## Maven Configuration
+- Все pom.xml настроены для Java 24
+- Lombok annotation processors
+- gRPC protobuf generation
+- Spring Boot 3.4.0 с virtual threads поддержкой
+
+Система готова для high-throughput финансовых операций с адаптивным переключением между стратегиями обработки на основе ML-анализа активности аккаунтов.
+
+обрати внимание, что в RecoveryService ты добавил в другом диалоге AdaptiveStrategyService, но он находится в пакете application/service, правильно ли это? выглядит, как будто не очень про чистую архитектуру

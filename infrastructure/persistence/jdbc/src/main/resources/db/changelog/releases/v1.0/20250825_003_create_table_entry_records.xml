@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.4.xsd"
+                   logicalFilePath="20250825_003_create_table_entry_records">
+    <changeSet id="20250825_003_create_table_entry_records" author="Igor Seleznyov">
+        <sql>
+            CREATE SEQUENCE ledger_entry_ordinal_sequence
+                AS BIGINT -- тип значений
+                START WITH 1 -- начальное значение
+                INCREMENT BY 1 -- шаг
+                NO MINVALUE
+                NO MAXVALUE -- для BIGINT максимум 9.22e18
+                CACHE 1;
+
+            CREATE TABLE ledger.entry_records
+            (
+                id              UUID        NOT NULL DEFAULT generate_uuid_v7_precise(),
+                account_id      UUID        NOT NULL,
+                transaction_id  UUID        NOT NULL,
+                entry_type      VARCHAR(6)  NOT NULL,
+                amount          BIGINT      NOT NULL,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+                operation_date  DATE        NOT NULL,
+                idempotency_key UUID        NOT NULL,-- возможно лишний
+                entry_ordinal   BIGINT      NOT NULL DEFAULT nextval('ledger_entry_ordinal_sequence'),
+                CONSTRAINT entry_records_pk PRIMARY KEY (id)
+            );
+
+            ALTER TABLE ledger.entry_records
+                ADD CONSTRAINT entry_records_entry_type_chk
+                    CHECK (entry_type IN ('DEBIT', 'CREDIT'));
+
+            CREATE INDEX idx_entry_records_account_id_operation_date_entry_ordinal
+                ON ledger.entry_records (account_id, operation_date DESC, entry_ordinal DESC);
+
+-- Для проверки идемпотентности
+            CREATE INDEX idx_entry_records_idempotency_key
+                ON ledger.entry_records (idempotency_key) WHERE idempotency_key IS NOT NULL;
+        </sql>
+        <rollback>
+            DROP TABLE IF EXISTS ledger.entry_record;
+            DROP SEQUENCE IF EXISTS ledger_entry_record_id_sequence;
+        </rollback>
+    </changeSet>
+
+
+</databaseChangeLog>
