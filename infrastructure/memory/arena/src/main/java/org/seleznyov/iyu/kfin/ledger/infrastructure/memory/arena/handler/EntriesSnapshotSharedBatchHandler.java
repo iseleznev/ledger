@@ -88,9 +88,9 @@ public class EntriesSnapshotSharedBatchHandler {
     private static final int ORDINAL_OFFSET = (int) (ORDINAL_LENGTH_OFFSET + LENGTH_TYPE.byteSize());
     private static final ValueLayout ORDINAL_TYPE = ValueLayout.JAVA_LONG;
 
-    private static final int POSTGRES_ENTRIES_SNAPSHOT_SIZE_RAW = (int) (ORDINAL_OFFSET + ORDINAL_TYPE.byteSize());
+    private static final int POSTGRES_ENTRIES_SNAPSHOT_RAW_SIZE = (int) (ORDINAL_OFFSET + ORDINAL_TYPE.byteSize());
 
-    public static final int POSTGRES_ENTRIES_SNAPSHOT_SIZE = (POSTGRES_ENTRIES_SNAPSHOT_SIZE_RAW + CPU_CACHE_LINE_SIZE - 1) & -CPU_CACHE_LINE_SIZE;
+    public static final int POSTGRES_ENTRIES_SNAPSHOT_SIZE = (POSTGRES_ENTRIES_SNAPSHOT_RAW_SIZE + CPU_CACHE_LINE_SIZE - 1) & -CPU_CACHE_LINE_SIZE;
 
     private final MemorySegment memorySegment;
     private final UUID entriesAccountId;

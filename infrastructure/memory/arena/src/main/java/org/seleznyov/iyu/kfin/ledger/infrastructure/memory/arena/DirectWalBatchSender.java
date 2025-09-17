@@ -22,7 +22,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * Минимизирует copying и использует прямой доступ к PostgreSQL protocol
  */
 @Slf4j
-public abstract class DirectPostgresBatchSender<T extends BatchRingBufferHandler> {
+public abstract class DirectWalBatchSender<T extends BatchRingBufferHandler> {
 
     protected final DataSource dataSource;
 
@@ -51,7 +51,7 @@ public abstract class DirectPostgresBatchSender<T extends BatchRingBufferHandler
     protected final long[] sentResults = new long[RESULTS_ARRAY_LENGTH];
     protected final T ringBufferHandler;
 
-    public DirectPostgresBatchSender(DataSource dataSource, T ringBufferHandler) {
+    public DirectWalBatchSender(DataSource dataSource, T ringBufferHandler) {
         this.dataSource = dataSource;
         this.ringBufferHandler = ringBufferHandler;
 //        log.info("Created DirectQueryExecutorSender with chunk_size={}KB", OPTIMAL_CHUNK_SIZE / 1024);
