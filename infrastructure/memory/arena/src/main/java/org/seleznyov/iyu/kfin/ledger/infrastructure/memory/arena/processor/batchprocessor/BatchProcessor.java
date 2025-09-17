@@ -5,5 +5,5 @@ import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.BatchRi
 @FunctionalInterface
 public interface BatchProcessor {
 
-    boolean processBatch(BatchRingBufferHandler ringBufferHandler, long batchSlotOffset, long batchRawSize);
+    long processBatch(BatchRingBufferHandler ringBufferHandler, long batchSlotOffset, long batchRawSize);
 }

@@ -23,7 +23,7 @@ public class PostgresBatchProcessor implements BatchProcessor {
     }
 
     @Override
-    public boolean processBatch(BatchRingBufferHandler ringBufferHandler, long batchSlotOffset, long batchRawSize) {
+    public long processBatch(BatchRingBufferHandler ringBufferHandler, long batchSlotOffset, long batchRawSize) {
 
         long startTime = System.nanoTime();
 
@@ -48,15 +48,11 @@ public class PostgresBatchProcessor implements BatchProcessor {
                     workerId,
                     checksum
                 );
-                return false;
+                return 0;
             }
 
             // ✅ Отправляем в PostgreSQL
-            final long copiedSize = directSender.sendDirectly(
-                ringBufferHandler,
-                batchSlotOffset,
-                batchRawSize
-            );
+            final long copiedSize = directSender.sendDirectly(batchSlotOffset, batchRawSize);
 
             if (copiedSize == batchRawSize) {
                 long processingTime = System.nanoTime() - startTime;
@@ -65,21 +61,19 @@ public class PostgresBatchProcessor implements BatchProcessor {
                     copiedSize,
                     processingTime / 1_000
                 );
-                return true;
             } else {
                 log.error("Worker {} insert mismatch: expected={}, actual={}",
                     workerId,
                     batchRawSize,
                     copiedSize
                 );
-                return false;
             }
-
+            return copiedSize;
         } catch (Exception e) {
             long processingTime = System.nanoTime() - startTime;
             log.error("Worker {} error processing batch after {}μs",
                 workerId, processingTime / 1_000, e);
-            return false;
+            return 0;
         }
     }
 
