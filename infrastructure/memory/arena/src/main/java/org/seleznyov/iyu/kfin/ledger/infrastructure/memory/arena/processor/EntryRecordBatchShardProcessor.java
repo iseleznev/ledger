@@ -5,29 +5,21 @@ import org.seleznyov.iyu.kfin.ledger.domain.model.entryrecord.EntryRecord;
 import org.seleznyov.iyu.kfin.ledger.domain.model.entryrecord.EntryType;
 import org.seleznyov.iyu.kfin.ledger.domain.model.snapshot.EntriesSnapshot;
 import org.seleznyov.iyu.kfin.ledger.domain.model.snapshot.EntriesSnapshotReasonType;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.configuration.LedgerConfiguration;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.*;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memoty.storage.context.EntryRecordMemoryContextConfiguration;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Complete HotAccountContext with all integrated solutions:
- * - PostgresBinaryEntryRecordLayout для zero-allocation storage
- * - ZeroAllocationPostgresProcessor для database integration
- * - SnapshotSolution для account snapshots
- * - Dedicated virtual thread per account
- * - Comprehensive metrics и monitoring
+ * HotAccountContext writes entry-record into batch and spreads to ring buffers when batch is full or idle for too long.
  */
 @Slf4j
-public class HotAccountProcessor {
+public class EntryRecordBatchShardProcessor {
 
     // Account configuration
     private static final int MAX_BATCH_ELEMENTS_COUNT = 1000;
@@ -39,7 +31,7 @@ public class HotAccountProcessor {
 
     // === CORE FIELDS ===
 
-    private final UUID accountId;
+    //    private final UUID accountId;
     private final EntriesSnapshotSharedBatchHandler snapshotSharedBatchHandler;
     private final PostgreSqlEntriesSnapshotBatchRingBufferHandler snapshotBatchRingBufferHandler;
 
@@ -49,11 +41,11 @@ public class HotAccountProcessor {
     private final EntryRecordBatchHandler entryRecordBatchHandler;
     private final PostgreSqlEntryRecordBatchRingBufferHandler pgEntryRecordBatchRingBufferHandler;
     private final WalEntryRecordBatchRingBufferHandler walEntryRecordBatchRingBufferHandler;
+//    private final WalEntryRecordBatchRingBufferHandler walEntryRecordBatchRingBufferHandler;
 //    private final MemorySegment amountArraySegment;
 
     // === THREADING ===
 
-    private final ExecutorService dedicatedExecutor;
     private volatile boolean shutdownRequested = false;
 
     // === STATE (только dedicated поток) ===
@@ -65,11 +57,15 @@ public class HotAccountProcessor {
     private volatile EntriesSnapshot lastSnapshot = null;
     private volatile long lastAccessTime = System.currentTimeMillis();
 
+    private final ExecutorService shardExecutorService;
+
     // === SNAPSHOT MANAGEMENT ===
 
     //    private final SnapshotArenaManager snapshotManager;
     private long lastSnapshotTime = System.currentTimeMillis();
     private int entriesSinceLastSnapshot = 0;
+    private final LedgerConfiguration ledgerConfiguration;
+
 
     // === METRICS ===
 
@@ -81,29 +77,32 @@ public class HotAccountProcessor {
 
     // === CONSTRUCTOR ===
 
-    public HotAccountProcessor(
-        EntryRecordMemoryContextConfiguration configuration,
+    public EntryRecordBatchShardProcessor(
+        LedgerConfiguration ledgerConfiguration,
         EntryRecordBatchHandler entryRecordBatchHandler,
-        PostgreSqlEntryRecordBatchRingBufferHandler pgEntryRecordBatchRingBufferHandler,
+        ExecutorService shardDedicatedExecutorService,
+        PostgreSqlEntryRecordBatchRingBufferHandler postgresqlEntryRecordBatchRingBufferHandler,
         EntriesSnapshotSharedBatchHandler snapshotSharedBatchHandler,
         PostgreSqlEntriesSnapshotBatchRingBufferHandler snapshotBatchRingBufferHandler,
         WalEntryRecordBatchRingBufferHandler walEntryRecordBatchRingBufferHandler
     ) {
-        this.accountId = configuration.accountId();
+//        this.accountId = configuration.accountId();
 
 //        this.accountArena = Arena.ofShared();
 
 //        final long entriesSnapshotMemorySize = (long) MAX_BATCH_ELEMENTS_COUNT * EntriesSnapshotSharedBatchHandler.POSTGRES_ENTRIES_SNAPSHOT_SIZE;
 //        final MemorySegment snapshotsSegment = accountArena.allocate(entriesSnapshotMemorySize, 64);
-
+        this.shardExecutorService = shardDedicatedExecutorService;
         this.snapshotSharedBatchHandler = snapshotSharedBatchHandler;
         this.snapshotBatchRingBufferHandler = snapshotBatchRingBufferHandler;
+        this.walEntryRecordBatchRingBufferHandler = walEntryRecordBatchRingBufferHandler;
+        this.ledgerConfiguration = ledgerConfiguration;
 //            new EntriesSnapshotBatchRingBufferHandler(
 //            snapshotsSegment,
 //            MAX_BATCH_ELEMENTS_COUNT
 //        );
 
-        log.info("Creating CompleteHotAccountContext for account {}", accountId);
+//        log.info("Creating CompleteHotAccountContext for account {}", accountId);
 
         // Initialize memory management
 //        initializeAccountMemory(this.accountArena);
@@ -112,16 +111,13 @@ public class HotAccountProcessor {
 
         // Create PostgreSQL binary layout
         this.entryRecordBatchHandler = entryRecordBatchHandler;
-        this.pgEntryRecordBatchRingBufferHandler = pgEntryRecordBatchRingBufferHandler;
+        this.pgEntryRecordBatchRingBufferHandler = postgresqlEntryRecordBatchRingBufferHandler;
 //            new EntryRecordBatchHandler(
 //            entriesSegment,
 //            configuration.accountId(),
 //            configuration.totalAmount(),
 //            LocalDateTime.now().toInstant(ZoneOffset.UTC).toEpochMilli()
 //        );
-
-        // Create dedicated executor
-        this.dedicatedExecutor = createDedicatedExecutor();
 
 //        this.maxTotalBatchSize = configuration.bufferEntriesMaxCount() * EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE;
 
@@ -133,36 +129,36 @@ public class HotAccountProcessor {
 //            SNAPSHOT_COUNT_THRESHOLD
 //        );
 
-        log.info("CompleteHotAccountContext created for account {}", accountId);
+//        log.info("CompleteHotAccountContext created for account {}", accountId);
     }
 
     // === INITIALIZATION ===
 
-    private ExecutorService createDedicatedExecutor() {
-        return Executors.newSingleThreadExecutor(runnable ->
-            Thread.ofVirtual()
-                .name("hot-account-" + accountId.toString().substring(0, 8))
-                .unstarted(runnable)
-        );
-    }
+//    private ExecutorService createDedicatedExecutor() {
+//        return Executors.newSingleThreadExecutor(runnable ->
+//            Thread.ofVirtual()
+//                .name("hot-account-" + accountId.toString().substring(0, 8))
+//                .unstarted(runnable)
+//        );
+//    }
 
     // === PUBLIC API ===
 
-    public CompletableFuture<Long> entryRecord(EntryRecord entryRecord) {
+    public CompletableFuture<Boolean> entryRecord(EntryRecord entryRecord) {
         if (shutdownRequested) {
             return CompletableFuture.failedFuture(
-                new IllegalStateException("Account context is shutting down: " + accountId)
+                new IllegalStateException("Account context is shutting down: " + entryRecord.accountId())
             );
         }
 
         return CompletableFuture.supplyAsync(() -> {
-
+            final EntryRecord registerEntryRecord = entryRecord;
             lastAccessTime = System.currentTimeMillis();
 
             try {
                 // Add entry в PostgreSQL binary format
                 if (EntryType.DEBIT.equals(entryRecord.entryType())
-                    && entryRecordBatchHandler.totalAmount() - entryRecord.amount() < 0
+                    && entryRecordBatchHandler.totalAmount(registerEntryRecord.accountId()) - entryRecord.amount() < 0
                 ) {
                     throw new IllegalStateException("Not enough money");
                 }
@@ -174,7 +170,7 @@ public class HotAccountProcessor {
                 // If barrier пройден - отправляем в shared ring buffer
                 if (barrierPassed) {
                     log.debug("Barrier passed for account {}, flushing batch with {} entries",
-                        accountId, currentBatchSize);
+                        entryRecord.accountId(), currentBatchSize);
                     flushToEntryRecordRingBuffer();
 
                     // Create barrier snapshot
@@ -182,20 +178,25 @@ public class HotAccountProcessor {
                 }
 
                 log.trace("Added entry to account {}: batch_size={}, amount={}",
-                    accountId, currentBatchSize, entryRecord.amount());
+                    entryRecord.accountId(), currentBatchSize, entryRecord.amount());
 
-                return entryRecordBatchHandler.operationsCount();
+                if (entryRecordBatchHandler.entriesCount(entryRecord.accountId()) >= ledgerConfiguration.entries().entryRecordsCountToSnapshot()) {
+                    snapshot(LocalDate.now(), entryRecord.accountId());
+                    entryRecordBatchHandler.resetEntriesCount(entryRecord.accountId());
+                }
 
-            } catch (Exception e) {
+                return true;
+
+            } catch (Exception exception) {
                 totalProcessingErrors.incrementAndGet();
-                log.error("Error processing entry for account {} in dedicated thread", accountId, e);
-                throw new RuntimeException("Entry processing failed", e);
+                log.error("Error processing entry for account {} in dedicated thread", entryRecord.accountId(), exception);
+                throw new RuntimeException("Entry processing failed", exception);
             }
 
-        }, dedicatedExecutor);
+        }, shardExecutorService);
     }
 
-    public CompletableFuture<Long> currentBalance() {
+    public CompletableFuture<Long> currentBalance(UUID accountId) {
         if (shutdownRequested) {
             return CompletableFuture.completedFuture(snapshotBalance);
         }
@@ -203,7 +204,7 @@ public class HotAccountProcessor {
         return CompletableFuture.supplyAsync(() -> {
 
             try {
-                long currentBalance = entryRecordBatchHandler.totalAmount(); //calculateCurrentBatchDelta();
+                long currentBalance = entryRecordBatchHandler.totalAmount(accountId); //calculateCurrentBatchDelta();
 //                long currentBalance = snapshotBalance + batchDelta;
 
 //                log.trace("Calculated current balance for account {}: snapshot={}, delta={}, total={}",
@@ -220,7 +221,7 @@ public class HotAccountProcessor {
                 return snapshotBalance;
             }
 
-        }, dedicatedExecutor);
+        }, shardExecutorService);
     }
 
 //    public CompletableFuture<Void> flushBatch() {
@@ -239,19 +240,22 @@ public class HotAccountProcessor {
 //        }, dedicatedExecutor);
 //    }
 
-    public CompletableFuture<Void> snapshot(LocalDate operationDay) {
-        return CompletableFuture.runAsync(() -> {
-            long currentBalance = entryRecordBatchHandler.totalAmount();
-            final EntriesSnapshot newSnapshot = createSnapshotInternal(
-                currentBalance,
-                operationDay,
-                entryRecordBatchHandler.entryRecordId(),
-                entryRecordBatchHandler.entryOrdinal(),
-                lastSnapshot
-            );
-            entryRecordBatchHandler.resetOperationsCount();
-            this.lastSnapshot = newSnapshot;
-        }, dedicatedExecutor);
+    public CompletableFuture<Void> asyncSnapshot(LocalDate operationDay, UUID accountId) {
+        return CompletableFuture.runAsync(() -> snapshot(operationDay, accountId), shardExecutorService);
+    }
+
+    private void snapshot(LocalDate operationDay, UUID accountId) {
+        long currentBalance = entryRecordBatchHandler.totalAmount(accountId);
+        final EntriesSnapshot newSnapshot = createSnapshotInternal(
+            accountId,
+            currentBalance,
+            operationDay,
+            entryRecordBatchHandler.entryRecordId(),
+            entryRecordBatchHandler.entryOrdinal(),
+            lastSnapshot
+        );
+        entryRecordBatchHandler.resetOperationsCount();
+        this.lastSnapshot = newSnapshot;
     }
 
     // === INTERNAL METHODS ===
@@ -279,14 +283,14 @@ public class HotAccountProcessor {
      */
     private void flushToEntryRecordRingBuffer() {
         if (currentBatchSize == 0) {
-            log.trace("No entries to flush for account {}", accountId);
+//            log.trace("No entries to flush for account {}", accountId);
             return;
         }
 
         long startTime = System.nanoTime();
 
-        log.debug("Flushing {} entries from account {} to shared ring buffer",
-            currentBatchSize, accountId);
+//        log.debug("Flushing {} entries from account {} to shared ring buffer",
+//            currentBatchSize, accountId);
 
         try {
             // Calculate total delta scalar
@@ -294,7 +298,7 @@ public class HotAccountProcessor {
             final long entriesOffset = entryRecordBatchHandler.offset();
             final long arenaHalfSize = entryRecordBatchHandler.arenaSize() >> 1;
             final boolean pgBarrierPassed = pgEntryRecordBatchRingBufferHandler.stampBatchForwardPassBarrier(
-                accountId,
+//                accountId,
                 entryRecordBatchHandler,
                 entriesOffset < arenaHalfSize
                     ? arenaHalfSize
@@ -305,20 +309,29 @@ public class HotAccountProcessor {
                 entryRecordBatchHandler.passedBarrierBatchAmount()
             );
             final boolean walBarrierPassed = walEntryRecordBatchRingBufferHandler.stampBatchForwardPassBarrier(
+
+/*
+        long walShardSequenceId,
+        EntryRecordBatchHandler entryRecordBatchHandler,
+        long entriesOffset,
+        int entriesCount,
+        long totalAmount
+
+ */
                 entryRecordBatchHandler.walShardSequenceId(),
-                accountId,
+//                accountId,
                 entryRecordBatchHandler,
-                entriesOffset < arenaHalfSize
-                    ? arenaHalfSize
-                    : 0,
-                (int) (entriesOffset < arenaHalfSize
-                    ? (entryRecordBatchHandler.arenaSize() - arenaHalfSize) / EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE
-                    : arenaHalfSize / EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE),
+//                entriesOffset < arenaHalfSize
+//                    ? arenaHalfSize
+//                    : 0,
+//                (int) (entriesOffset < arenaHalfSize
+//                    ? (entryRecordBatchHandler.arenaSize() - arenaHalfSize) / EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE
+//                    : arenaHalfSize / EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE),
                 entryRecordBatchHandler.passedBarrierOffset(),
-                entryRecordBatchHandler.barrierPassedEntriesCount(),
-                entryRecordBatchHandler.passedBarrierBatchAmount()
+                entryRecordBatchHandler.barrierPassedEntriesCount()
+//                entryRecordBatchHandler.passedBarrierBatchAmount()
             );
-            final long walSequenceId = walEntryRecordBatchRingBufferHandler.nextWalShardSequenceId();
+            final long walSequenceId = walEntryRecordBatchRingBufferHandler.nextWalSequenceId();
             entryRecordBatchHandler.walShardSequenceId(walSequenceId);
             // Send напрямую в shared ring buffer БЕЗ промежуточных objects
 
@@ -341,11 +354,11 @@ public class HotAccountProcessor {
 //                throw new RuntimeException("Shared ring buffer full, cannot flush batch");
 //            }
 
-        } catch (Exception e) {
+        } catch (Exception exception) {
             long flushTime = System.nanoTime() - startTime;
-            log.error("Error flushing account {} batch after {}μs",
-                accountId, flushTime / 1_000, e);
-            throw new RuntimeException("Batch flush failed for account " + accountId, e);
+//            log.error("Error flushing account {} batch after {}μs",
+//                accountId, flushTime / 1_000, e);
+            throw new RuntimeException("Batch flush failed", exception);
         }
     }
 
@@ -412,7 +425,14 @@ public class HotAccountProcessor {
 //        createSnapshotInternal(currentBalance, SnapshotSolution.SnapshotTrigger.MANUAL);
 //    }
 //
-    private EntriesSnapshot createSnapshotInternal(long balance, LocalDate operationDay, UUID entryRecordId, long entryOrdinal, EntriesSnapshot previousSnapshot) {
+    private EntriesSnapshot createSnapshotInternal(
+        UUID accountId,
+        long balance,
+        LocalDate operationDay,
+        UUID entryRecordId,
+        long entryOrdinal,
+        EntriesSnapshot previousSnapshot
+    ) {
         try {
             long currentTime = LocalDateTime.now().toInstant(ZoneOffset.UTC).toEpochMilli();
             long durationSinceLastSnapshot = previousSnapshot != null
@@ -482,7 +502,6 @@ public class HotAccountProcessor {
 //        final EntriesSnapshot lastSnapshot = snapshotManager.getLastSnapshot();
 
         return HotAccountMetrics.builder()
-            .accountId(accountId)
             .currentBatchSize(currentBatchSize)
             .snapshotBalance(snapshotBalance)
             .snapshotSequence(snapshotSequence)
@@ -509,9 +528,9 @@ public class HotAccountProcessor {
     public String getDiagnostics() {
         HotAccountMetrics metrics = getMetrics();
         return String.format(
-            "CompleteHotAccountContext[account=%s, batch_size=%d, balance=%d, " +
+            "CompleteHotAccountContext[batch_size=%d, balance=%d, " +
                 "entries=%d, batches=%d, snapshots=%d, errors=%d, idle=%s]",
-            accountId.toString().substring(0, 8), metrics.currentBatchSize, metrics.snapshotBalance,
+            metrics.currentBatchSize, metrics.snapshotBalance,
             metrics.totalEntriesProcessed, metrics.totalBatchesFlushed,
             metrics.totalSnapshotsCreated, metrics.totalProcessingErrors, metrics.isIdle
         );
@@ -520,18 +539,48 @@ public class HotAccountProcessor {
     // === LIFECYCLE MANAGEMENT ===
 
     public void shutdown() {
-        log.info("Shutting down CompleteHotAccountContext for account {}", accountId);
+//        log.info("Shutting down CompleteHotAccountContext for account {}", accountId);
 
         shutdownRequested = true;
 
         CompletableFuture<Void> finalFlush = CompletableFuture.runAsync(() -> {
             if (currentBatchSize > 0) {
-                log.info("Final flush for account {} during shutdown: {} entries",
-                    accountId, currentBatchSize);
+//                log.info("Final flush for account {} during shutdown: {} entries",
+//                    accountId, currentBatchSize);
                 flushToEntryRecordRingBuffer();
             }
 
             // Create final snapshot
+            //TODO: здесь нужно прочитать весь батч и по каждому аккаунту батча сделать снапшот
+            while (entryRecordBatchHandler.offset() > 0)
+            snapshot(entryRecordBatchHandler.operationDay());
+
+            final long entriesOffset = entryRecordBatchHandler.offset();
+            final long arenaHalfSize = entryRecordBatchHandler.arenaSize() >> 1;
+            final long startOffset = entriesOffset < arenaHalfSize
+                ? arenaHalfSize
+                : 0;
+            final long tailSnapshotSize = entriesOffset - startOffset;
+            if (ledgerConfiguration.entries().entryRecordsCountToSnapshot() > entriesOffset - startOffset) {
+                final long beforeStartOffset = startOffset == 0
+                    ? entryRecordBatchHandler.arenaSize() - (ledgerConfiguration.entries().entryRecordsCountToSnapshot() - tailSnapshotSize)
+                    : arenaHalfSize - (ledgerConfiguration.entries().entryRecordsCountToSnapshot() - tailSnapshotSize);
+
+            }
+            final boolean pgBarrierPassed = pgEntryRecordBatchRingBufferHandler.stampBatchForwardPassBarrier(
+//                accountId,
+                entryRecordBatchHandler,
+                entriesOffset < arenaHalfSize
+                    ? arenaHalfSize
+                    : 0,
+                (int) (entriesOffset < arenaHalfSize
+                    ? (entryRecordBatchHandler.arenaSize() - arenaHalfSize) / EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE
+                    : arenaHalfSize / EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE),
+                entryRecordBatchHandler.passedBarrierBatchAmount()
+            );
+
+
+
             createSnapshotInternal(
                 entryRecordBatchHandler.totalAmount(),
                 entryRecordBatchHandler.operationDay(),
@@ -540,22 +589,22 @@ public class HotAccountProcessor {
                 lastSnapshot
             );
 
-        }, dedicatedExecutor);
+        }, shardExecutorService);
 
         try {
             finalFlush.get(5, TimeUnit.SECONDS);
         } catch (Exception e) {
-            log.error("Error during final flush for account {}", accountId, e);
+//            log.error("Error during final flush for account {}", accountId, e);
         }
 
-        dedicatedExecutor.shutdown();
+        shardExecutorService.shutdown();
 
         try {
-            if (!dedicatedExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
-                dedicatedExecutor.shutdownNow();
+            if (!shardExecutorService.awaitTermination(10, TimeUnit.SECONDS)) {
+                shardExecutorService.shutdownNow();
             }
         } catch (InterruptedException e) {
-            dedicatedExecutor.shutdownNow();
+            shardExecutorService.shutdownNow();
             Thread.currentThread().interrupt();
         }
 
@@ -564,18 +613,17 @@ public class HotAccountProcessor {
 //                accountArena.close();
 //            }
         } catch (Exception e) {
-            log.error("Error closing Arena for account {}", accountId, e);
+//            log.error("Error closing Arena for account {}", accountId, e);
         }
 
-        log.info("CompleteHotAccountContext shutdown completed for account {}. Final metrics: {}",
-            accountId, getDiagnostics());
+//        log.info("CompleteHotAccountContext shutdown completed for account {}. Final metrics: {}",
+//            accountId, getDiagnostics());
     }
 
     // === METRICS CLASS ===
 
     public static class HotAccountMetrics {
 
-        public final UUID accountId;
         public final int currentBatchSize;
         public final long snapshotBalance;
         public final long snapshotSequence;
@@ -591,13 +639,12 @@ public class HotAccountProcessor {
         public final double memoryUtilization;
         public final EntriesSnapshot lastSnapshot;
 
-        private HotAccountMetrics(UUID accountId, int currentBatchSize, long snapshotBalance,
+        private HotAccountMetrics(int currentBatchSize, long snapshotBalance,
                                   long snapshotSequence, long totalEntriesProcessed, long totalBatchesFlushed,
                                   long totalSnapshotsCreated, long totalProcessingErrors, long avgFlushTimeMicros,
                                   long lastAccessTime, long lastSnapshotTime, int entriesSinceLastSnapshot,
                                   boolean isIdle, double memoryUtilization,
                                   EntriesSnapshot lastSnapshot) {
-            this.accountId = accountId;
             this.currentBatchSize = currentBatchSize;
             this.snapshotBalance = snapshotBalance;
             this.snapshotSequence = snapshotSequence;
@@ -712,7 +759,7 @@ public class HotAccountProcessor {
             }
 
             public HotAccountMetrics build() {
-                return new HotAccountMetrics(accountId, currentBatchSize, snapshotBalance, snapshotSequence,
+                return new HotAccountMetrics(currentBatchSize, snapshotBalance, snapshotSequence,
                     totalEntriesProcessed, totalBatchesFlushed, totalSnapshotsCreated, totalProcessingErrors,
                     avgFlushTimeMicros, lastAccessTime, lastSnapshotTime, entriesSinceLastSnapshot,
                     isIdle, memoryUtilization, lastSnapshot);

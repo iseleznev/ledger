@@ -13,19 +13,27 @@ import javax.sql.DataSource;
 public class EntryRecordDirectPostgresBatchSender extends DirectPostgresBatchSender<PostgreSqlEntryRecordBatchRingBufferHandler> {
 
     private static final String COPY_SQL = """
-        COPY ledger.entry_records
         (id, account_id, transaction_id, entry_type, amount,
          created_at_millis, operation_date_epoch_day, idempotency_key,
          currency_code, entry_ordinal)
         FROM STDIN WITH (FORMAT BINARY)
         """;
 
-    public EntryRecordDirectPostgresBatchSender(DataSource dataSource, PostgreSqlEntryRecordBatchRingBufferHandler ringBufferHandler) {
+    private final String tableName;
+    private final String sql;
+
+    public EntryRecordDirectPostgresBatchSender(
+        DataSource dataSource,
+        String tableName,
+        PostgreSqlEntryRecordBatchRingBufferHandler ringBufferHandler
+    ) {
         super(dataSource, ringBufferHandler);
+        this.tableName = tableName;
+        this.sql = "COPY " + this.tableName + " " + COPY_SQL;
     }
 
     @Override
     protected String copySql() {
-        return COPY_SQL;
+        return this.sql;
     }
 }

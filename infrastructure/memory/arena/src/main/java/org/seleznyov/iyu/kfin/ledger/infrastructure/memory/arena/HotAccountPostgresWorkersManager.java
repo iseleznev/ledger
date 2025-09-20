@@ -9,7 +9,9 @@ import javax.sql.DataSource;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
@@ -22,10 +24,11 @@ import java.util.concurrent.locks.LockSupport;
 public class HotAccountPostgresWorkersManager {
 
     private final PostgreSqlEntryRecordBatchRingBufferHandler entryRecordBatchRingBuffer;
-    private final DirectPostgresBatchSender<PostgreSqlEntryRecordBatchRingBufferHandler> directSender;
+    private final Map<Integer, DirectPostgresBatchSender<PostgreSqlEntryRecordBatchRingBufferHandler>> directSenders;
     private final Arena postgresArena;
     private final List<Thread> postgresWorkers = new ArrayList<>();
     private final AtomicBoolean running = new AtomicBoolean(true);
+    private final PostgresCheckpointWriter checkpointWriter;
 
     // ===== METRICS =====
 
@@ -36,13 +39,15 @@ public class HotAccountPostgresWorkersManager {
 
     public HotAccountPostgresWorkersManager(
         DataSource dataSource,
-        @Value("${ledger.postgres.ring-buffer-size-gb:1}") int ringBufferSizeGB,
-        @Value("${ledger.postgres.max-batches:8192}") int maxBatches,
-        @Value("${ledger.postgres.max-entries-per-batch:1000}") int maxEntriesPerBatch,
-        @Value("${ledger.postgres.worker-threads:4}") int workerThreads) {
-
+        int ringBufferSizeGB,
+        int maxBatches,
+        int maxEntriesPerBatch,
+        int workerThreadsCount,
+        int stageTablesPerWorkerCount,
+        String tableNamePrefix
+    ) {
         log.info("Initializing ZeroAllocationPostgresProcessor: ring_buffer={}GB, max_batches={}, max_entries_per_batch={}, workers={}",
-            ringBufferSizeGB, maxBatches, maxEntriesPerBatch, workerThreads);
+            ringBufferSizeGB, maxBatches, maxEntriesPerBatch, workerThreadsCount);
 
         this.postgresArena = Arena.ofShared();
         // ✅ Создаем огромный off-heap ring buffer
@@ -54,15 +59,30 @@ public class HotAccountPostgresWorkersManager {
             maxEntriesPerBatch
         );
 
-        this.directSender = new EntryRecordDirectPostgresBatchSender(dataSource, this.entryRecordBatchRingBuffer);
+        this.directSenders = new HashMap<>();// new EntryRecordDirectPostgresBatchSender(dataSource, this.entryRecordBatchRingBuffer);
 
-        startWorkers(workerThreads);
+        directSenders(dataSource, tableNamePrefix, workerThreadsCount, stageTablesPerWorkerCount);
+
+        startWorkers(workerThreadsCount);
 
         log.info("ZeroAllocationPostgresProcessor initialized successfully");
     }
 
-    private void startWorkers(int workerCount) {
-        for (int i = 0; i < workerCount; i++) {
+    private void directSenders(DataSource dataSource, String tableNamePrefix, int workerThreadsCount, int stageTablesPerWorkerCount) {
+        for (int i = 0; i < workerThreadsCount; i++) {
+            final int workerId = i;
+            for (int j = 0; j < stageTablesPerWorkerCount; j++) {
+                final String tableName = tableNamePrefix + "_w" + workerId + "t" + j;
+                this.directSenders.put(
+                    workerId,
+                    new EntryRecordDirectPostgresBatchSender(dataSource, tableName, this.entryRecordBatchRingBuffer)
+                );
+            }
+        }
+    }
+
+    private void startWorkers(int workerThreadsCount) {
+        for (int i = 0; i < workerThreadsCount; i++) {
             final int workerId = i;
 
             Thread worker = Thread.ofVirtual()
@@ -72,7 +92,7 @@ public class HotAccountPostgresWorkersManager {
             postgresWorkers.add(worker);
         }
 
-        log.info("Started {} zero-allocation PostgreSQL workers", workerCount);
+        log.info("Started {} zero-allocation PostgreSQL workers", workerThreadsCount);
     }
 
     /**
@@ -82,7 +102,7 @@ public class HotAccountPostgresWorkersManager {
         log.info("Worker {} started processing zero-allocation batches", workerId);
 
         // ✅ Создаем consumer который работает напрямую с off-heap memory
-        final PostgresBatchProcessor processor = new  PostgresBatchProcessor(directSender, workerId);
+        final PostgresBatchProcessor processor = new  PostgresBatchProcessor(directSenders.get(workerId), workerId);
 //            (ringSegment, batchOffset) -> {
 //                return processOffHeapBatch(ringSegment, batchOffset, workerId);
 //            };
@@ -90,11 +110,18 @@ public class HotAccountPostgresWorkersManager {
         while (running.get()) {
             try {
                 // ✅ Пытаемся обработать батч БЕЗ copying в heap
-                boolean processed = entryRecordBatchRingBuffer.tryProcessBatch(processor);
+                final long walSequenceId = entryRecordBatchRingBuffer.tryProcessBatch(processor);
 
-                if (!processed) {
+                if (walSequenceId > 0) {
+//                    final long walSequenceId = entryRecordBatchRingBuffer.walSequenceId(batchOffset);
+                    checkpointWriter.writeCheckpoint(walSequenceId);
+                }
+
+                if (walSequenceId == 0) {
                     // Нет данных - короткая пауза
-                    LockSupport.parkNanos(1_000_000L); // 1ms
+                    Thread.sleep(1);
+//                    Thread.yield();
+                    //LockSupport.parkNanos(1_000_000L); // 1ms
                 }
 
             } catch (Exception e) {
@@ -102,7 +129,8 @@ public class HotAccountPostgresWorkersManager {
                 log.error("Error in zero-allocation worker {}", workerId, e);
 
                 // Пауза при ошибке чтобы не спамить
-                LockSupport.parkNanos(10_000_000L); // 10ms
+                Thread.sleep(10);
+                //LockSupport.parkNanos(10_000_000L); // 10ms
             }
         }
 

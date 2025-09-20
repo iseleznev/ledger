@@ -51,7 +51,10 @@ public abstract class DirectPostgresBatchSender<T extends BatchRingBufferHandler
     protected final long[] sentResults = new long[RESULTS_ARRAY_LENGTH];
     protected final T ringBufferHandler;
 
-    public DirectPostgresBatchSender(DataSource dataSource, T ringBufferHandler) {
+    public DirectPostgresBatchSender(
+        DataSource dataSource,
+        T ringBufferHandler
+    ) {
         this.dataSource = dataSource;
         this.ringBufferHandler = ringBufferHandler;
 //        log.info("Created DirectQueryExecutorSender with chunk_size={}KB", OPTIMAL_CHUNK_SIZE / 1024);
@@ -265,7 +268,7 @@ public abstract class DirectPostgresBatchSender<T extends BatchRingBufferHandler
 
     // ===== METRICS & MONITORING =====
 
-    public DirectQueryExecutorMetrics getMetrics() {
+    public DirectPostgresBatchSender.DirectQueryExecutorMetrics getMetrics() {
         long batches = totalBatchesSent.get();
         long entries = totalEntriesSent.get();
         long totalTimeNanos = totalSendTime.get();
@@ -275,7 +278,7 @@ public abstract class DirectPostgresBatchSender<T extends BatchRingBufferHandler
         double throughputBytesPerSec = totalTimeNanos > 0 ?
             (double) totalBytesSent.get() / totalTimeNanos * 1_000_000_000 : 0;
 
-        return new DirectQueryExecutorMetrics(
+        return new DirectPostgresBatchSender.DirectQueryExecutorMetrics(
             totalBatchesSent.get(),
             totalEntriesSent.get(),
             totalBytesSent.get(),
@@ -287,7 +290,7 @@ public abstract class DirectPostgresBatchSender<T extends BatchRingBufferHandler
     }
 
     public String getDiagnostics() {
-        DirectQueryExecutorMetrics metrics = getMetrics();
+        DirectPostgresBatchSender.DirectQueryExecutorMetrics metrics = getMetrics();
         return String.format(
             "DirectQueryExecutorSender[batches=%d, entries=%d, bytes=%dMB, errors=%d, " +
                 "avg_batch_time=%.1fms, throughput=%.1fMB/s]",

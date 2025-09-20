@@ -1,7 +1,10 @@
 package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena;
 
 import lombok.extern.slf4j.Slf4j;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.configuration.LedgerConfiguration;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.EntryRecordBatchHandler;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.WalEntryRecordBatchRingBufferHandler;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.processor.EntryRecordBatchShardProcessor;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -9,6 +12,8 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -19,18 +24,22 @@ import java.util.concurrent.atomic.AtomicLong;
 public class HotAccountArenaManager {
 
     // Configuration constants
-    private static final long DEFAULT_SEGMENT_SIZE = 64 * 1024 * 1024; // 64MB per account
+//    private static final long DEFAULT_SEGMENT_SIZE = 64 * 1024 * 1024; // 64MB per account
     private static final long IDLE_TIMEOUT_MS = 30 * 60 * 1000L; // 30 minutes
     private static final int CLEANUP_INTERVAL_SECONDS = 300; // 5 minutes
 
     // Arena and memory management
     private final Arena sharedArena;
     private final long entriesBatchSize;
-    private final long maxSegments;
-    private final long totalArenaSize;
+    private final long maxBatchEntriesCount;
+//    private final long maxSegments;
+//    private final long totalArenaSize;
 
     // Account segments registry
-    private final ConcurrentHashMap<UUID, EntryRecordBatchHandler> batchHandlers = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Integer, EntryRecordBatchHandler> batchHandlers = new ConcurrentHashMap<>();
+    private final ExecutorService[] stripeExecutors;
+    private final ConcurrentHashMap<Integer, EntryRecordBatchShardProcessor> processors = new ConcurrentHashMap<>();
+
 //    private final ReentrantReadWriteLock cleanupLock = new ReentrantReadWriteLock();
 
     // Metrics and monitoring
@@ -38,25 +47,28 @@ public class HotAccountArenaManager {
     private final AtomicLong totalSegmentsReleased = new AtomicLong(0);
     private final AtomicLong lastCleanupTime = new AtomicLong(System.currentTimeMillis());
 
-    public HotAccountArenaManager(long totalArenaSizeGB) {
-        this(totalArenaSizeGB, DEFAULT_SEGMENT_SIZE);
-    }
+    public HotAccountArenaManager(
+        LedgerConfiguration ledgerConfiguration
+        //long totalArenaSizeGB, long segmentSizeMB, int stripeThreadsCount
+    ) {
+//        this.totalArenaSize =  //totalArenaSizeGB * 1024L * 1024L * 1024L;
+//        this.entriesBatchSize = segmentSizeMB * 1024L * 1024L;
+//        this.maxSegments = totalArenaSize / entriesBatchSize;
 
-    public HotAccountArenaManager(long totalArenaSizeGB, long segmentSizeMB) {
-        this.totalArenaSize = totalArenaSizeGB * 1024L * 1024L * 1024L;
-        this.entriesBatchSize = segmentSizeMB * 1024L * 1024L;
-        this.maxSegments = totalArenaSize / entriesBatchSize;
-
-        if (maxSegments <= 0) {
-            throw new IllegalArgumentException(
-                "Arena size too small: " + totalArenaSize + " bytes, segment size: " + entriesBatchSize + " bytes"
-            );
-        }
+//        if (maxSegments <= 0) {
+//            throw new IllegalArgumentException(
+//                "Arena size too small: " + totalArenaSize + " bytes, segment size: " + entriesBatchSize + " bytes"
+//            );
+//        }
+        this.maxBatchEntriesCount = ledgerConfiguration.entries().batchEntriesCount();
+        this.entriesBatchSize = this.maxBatchEntriesCount * EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE;
 
         this.sharedArena = Arena.ofShared();
 
-        log.info("Created SegmentedHotAccountArena: total_size={}GB, segment_size={}MB, max_segments={}",
-            totalArenaSizeGB, segmentSizeMB / (1024 * 1024), maxSegments);
+        this.stripeExecutors = new ExecutorService[ledgerConfiguration.hotAccounts().workerThreadsCount()];
+
+//        log.info("Created SegmentedHotAccountArena: total_size={}GB, segment_size={}MB, max_segments={}",
+//            totalArenaSizeGB, segmentSizeMB / (1024 * 1024), maxSegments);
     }
 
     /**
@@ -85,7 +97,7 @@ public class HotAccountArenaManager {
 //                return batchHandler;
 //            }
             //TODO: получить сумму из базы данных
-            return createNewSegment(accountId, totalAmount);
+            return initializeWorkers();
 
         } catch (Exception e) {
             log.error("Failed to get or create segment for account {}", accountId, e);
@@ -99,30 +111,25 @@ public class HotAccountArenaManager {
     /**
      * Creates a new memory segment and layout for the account
      */
-    private EntryRecordBatchHandler createNewSegment(UUID accountId, long totalAmount) {
-        if (batchHandlers.size() >= maxSegments) {
-            // Try cleanup first
-            performCleanup(accountId);
+    public EntryRecordBatchHandler initializeWorkers(LedgerConfiguration ledgerConfiguration) {
+//        if (batchHandlers.size() >= maxSegments) {
+        // Try cleanup first
+//            performCleanup(accountId);
 
-            // Check again after cleanup
-            if (batchHandlers.size() >= maxSegments) {
-                throw new RuntimeException(
-                    "Maximum segments reached: " + maxSegments +
-                        ". Cannot create segment for account: " + accountId
-                );
-            }
-        }
+        // Check again after cleanup
+//            if (batchHandlers.size() >= maxSegments) {
+//                throw new RuntimeException(
+//                    "Maximum segments reached: " + maxSegments +
+//                        ". Cannot create segment for account: " + accountId
+//                );
+//            }
+//        }
 
         try {
             // Allocate memory segment from shared arena
-            final MemorySegment memorySegment = sharedArena.allocate(entriesBatchSize, 64); // 64-byte aligned
-
-            // Create EntryRecordLayout for this segment
-            final EntryRecordBatchHandler entriesBatchHandler = new EntryRecordBatchHandler(
-                memorySegment,
-                accountId,
-                totalAmount,
-                LocalDateTime.now().toInstant(ZoneOffset.UTC).toEpochMilli()
+            final MemorySegment memorySegment = sharedArena.allocate(
+                this.entriesBatchSize * stripeExecutors.length,
+                64// 64-byte aligned
             );
 
             // Create segment wrapper
@@ -131,8 +138,51 @@ public class HotAccountArenaManager {
 //            );
 
             // Register the segment
-            batchHandlers.put(accountId, entriesBatchHandler);
-            totalSegmentsCreated.incrementAndGet();
+            for (int i = 0; i < stripeExecutors.length; ++i) {
+                final int workerIndex = i;
+
+                this.stripeExecutors[workerIndex] = Executors.newSingleThreadExecutor(runnable -> {
+                    Thread thread = Thread.ofPlatform()
+                        .name("account-stripe-" + workerIndex)
+                        .priority(Thread.NORM_PRIORITY + 1) // Повышенный приоритет
+                        .unstarted(runnable);
+
+                    // Настройки для финансового приложения
+                    thread.setUncaughtExceptionHandler((t, exception) -> {
+                            log.error("Uncaught exception in stripe {} thread: {}", workerIndex, t.getName(), exception);
+                            // Здесь можно добавить алертинг
+                        }
+                    );
+
+                    return thread;
+                });
+
+                final EntryRecordBatchHandler entriesBatchHandler = new EntryRecordBatchHandler(
+                    memorySegment.asSlice(this.entriesBatchSize * workerIndex, this.entriesBatchSize),
+                    walSequenceId,
+                    ledgerConfiguration
+                );
+
+                processors.put(
+                    workerIndex,
+                    new EntryRecordBatchShardProcessor(
+                        entriesBatchHandler,
+                        this.stripeExecutors[workerIndex],
+
+/*
+        EntryRecordBatchHandler entryRecordBatchHandler,
+        ExecutorService shardDedicatedExecutorService,
+        PostgreSqlEntryRecordBatchRingBufferHandler pgEntryRecordBatchRingBufferHandler,
+        EntriesSnapshotSharedBatchHandler snapshotSharedBatchHandler,
+        PostgreSqlEntriesSnapshotBatchRingBufferHandler snapshotBatchRingBufferHandler
+
+ */
+                    )
+                );
+
+                batchHandlers.put(workerIndex, entriesBatchHandler);
+                totalSegmentsCreated.incrementAndGet();
+            }
 
             log.debug("Created new segment for account {}: segment_size={}MB, total_active={}",
                 accountId, entriesBatchSize / (1024 * 1024), batchHandlers.size());
@@ -289,6 +339,7 @@ public class HotAccountArenaManager {
      * Metrics class for monitoring arena usage
      */
     public static class ArenaMetrics {
+
         public final long totalArenaSize;
         public final long segmentSize;
         public final long maxSegments;
@@ -316,6 +367,7 @@ public class HotAccountArenaManager {
         }
 
         public static class Builder {
+
             private long totalArenaSize;
             private long segmentSize;
             private long maxSegments;
@@ -325,14 +377,45 @@ public class HotAccountArenaManager {
             private double memoryUtilization;
             private long lastCleanupTime;
 
-            public Builder totalArenaSize(long totalArenaSize) { this.totalArenaSize = totalArenaSize; return this; }
-            public Builder segmentSize(long segmentSize) { this.segmentSize = segmentSize; return this; }
-            public Builder maxSegments(long maxSegments) { this.maxSegments = maxSegments; return this; }
-            public Builder activeSegments(int activeSegments) { this.activeSegments = activeSegments; return this; }
-            public Builder totalSegmentsCreated(long totalSegmentsCreated) { this.totalSegmentsCreated = totalSegmentsCreated; return this; }
-            public Builder totalSegmentsReleased(long totalSegmentsReleased) { this.totalSegmentsReleased = totalSegmentsReleased; return this; }
-            public Builder memoryUtilization(double memoryUtilization) { this.memoryUtilization = memoryUtilization; return this; }
-            public Builder lastCleanupTime(long lastCleanupTime) { this.lastCleanupTime = lastCleanupTime; return this; }
+            public Builder totalArenaSize(long totalArenaSize) {
+                this.totalArenaSize = totalArenaSize;
+                return this;
+            }
+
+            public Builder segmentSize(long segmentSize) {
+                this.segmentSize = segmentSize;
+                return this;
+            }
+
+            public Builder maxSegments(long maxSegments) {
+                this.maxSegments = maxSegments;
+                return this;
+            }
+
+            public Builder activeSegments(int activeSegments) {
+                this.activeSegments = activeSegments;
+                return this;
+            }
+
+            public Builder totalSegmentsCreated(long totalSegmentsCreated) {
+                this.totalSegmentsCreated = totalSegmentsCreated;
+                return this;
+            }
+
+            public Builder totalSegmentsReleased(long totalSegmentsReleased) {
+                this.totalSegmentsReleased = totalSegmentsReleased;
+                return this;
+            }
+
+            public Builder memoryUtilization(double memoryUtilization) {
+                this.memoryUtilization = memoryUtilization;
+                return this;
+            }
+
+            public Builder lastCleanupTime(long lastCleanupTime) {
+                this.lastCleanupTime = lastCleanupTime;
+                return this;
+            }
 
             public ArenaMetrics build() {
                 return new ArenaMetrics(totalArenaSize, segmentSize, maxSegments, activeSegments,
