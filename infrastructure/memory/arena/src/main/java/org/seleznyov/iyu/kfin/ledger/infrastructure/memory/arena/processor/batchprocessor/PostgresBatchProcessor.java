@@ -3,6 +3,7 @@ package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.processor.batc
 import lombok.extern.slf4j.Slf4j;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.DirectPostgresBatchSender;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.BatchRingBufferHandler;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.PostgreSqlEntryRecordBatchRingBufferHandler;
 
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
@@ -14,10 +15,10 @@ import java.lang.foreign.ValueLayout;
 @Slf4j
 public class PostgresBatchProcessor implements BatchProcessor {
 
-    private final DirectPostgresBatchSender directSender;
+    private final DirectPostgresBatchSender<PostgreSqlEntryRecordBatchRingBufferHandler> directSender;
     private final int workerId;
 
-    public PostgresBatchProcessor(DirectPostgresBatchSender directSender, int workerId) {
+    public PostgresBatchProcessor(DirectPostgresBatchSender<PostgreSqlEntryRecordBatchRingBufferHandler> directSender, int workerId) {
         this.directSender = directSender;
         this.workerId = workerId;
     }

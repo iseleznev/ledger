@@ -261,7 +261,7 @@ public class CommonRecordDirectPostgresBatchSender {
 
     // ===== METRICS & MONITORING =====
 
-    public DirectQueryExecutorMetrics getMetrics() {
+    public CommonRecordDirectPostgresBatchSender.DirectQueryExecutorMetrics getMetrics() {
         long batches = totalBatchesSent.get();
         long entries = totalEntriesSent.get();
         long totalTimeNanos = totalSendTime.get();
@@ -271,7 +271,7 @@ public class CommonRecordDirectPostgresBatchSender {
         double throughputBytesPerSec = totalTimeNanos > 0 ?
             (double) totalBytesSent.get() / totalTimeNanos * 1_000_000_000 : 0;
 
-        return new DirectQueryExecutorMetrics(
+        return new CommonRecordDirectPostgresBatchSender.DirectQueryExecutorMetrics(
             totalBatchesSent.get(),
             totalEntriesSent.get(),
             totalBytesSent.get(),
@@ -283,7 +283,7 @@ public class CommonRecordDirectPostgresBatchSender {
     }
 
     public String getDiagnostics() {
-        DirectQueryExecutorMetrics metrics = getMetrics();
+        CommonRecordDirectPostgresBatchSender.DirectQueryExecutorMetrics metrics = getMetrics();
         return String.format(
             "DirectQueryExecutorSender[batches=%d, entries=%d, bytes=%dMB, errors=%d, " +
                 "avg_batch_time=%.1fms, throughput=%.1fMB/s]",

@@ -7,18 +7,37 @@ import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.processor.batch
 
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
-import java.util.UUID;
-import java.util.concurrent.atomic.AtomicLong;
 
 @Slf4j
 @Data
 @Accessors(fluent = true)
 public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHandler {
 
-    private static final VarHandle STAMP_MEMORY_BARRIER_STATUS = ValueLayout.JAVA_INT.varHandle();
+    private static final VarHandle STAMP_STATUS_MEMORY_BARRIER;
+    private static final VarHandle WAL_SEQUENCE_ID_MEMORY_BARRIER;
+    private static final VarHandle READ_OFFSET_MEMORY_BARRIER;
+    private static final VarHandle STAMP_OFFSET_MEMORY_BARRIER;
+
+    static {
+        try {
+            MethodHandles.Lookup lookup = MethodHandles.lookup();
+            // Для статических полей
+            STAMP_STATUS_MEMORY_BARRIER = lookup.findVarHandle(
+                WalEntryRecordBatchRingBufferHandler.class, "stampStatus", int.class);
+            WAL_SEQUENCE_ID_MEMORY_BARRIER = lookup.findVarHandle(
+                WalEntryRecordBatchRingBufferHandler.class, "walSequenceId", long.class);
+            READ_OFFSET_MEMORY_BARRIER = lookup.findVarHandle(
+                WalEntryRecordBatchRingBufferHandler.class, "readOffset", long.class);
+            STAMP_OFFSET_MEMORY_BARRIER = lookup.findVarHandle(
+                WalEntryRecordBatchRingBufferHandler.class, "stampOffset", long.class);
+        } catch (Exception e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
 
     private final static int CPU_CACHE_LINE_SIZE = 64;
 
@@ -103,7 +122,7 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
     private final MemorySegment ringBufferSegment;
     private final int shardId;
     private final int maxBatchesPerFile;
-//    private long currentSlotOffset = METADATA_SIZE;
+    //    private long currentSlotOffset = METADATA_SIZE;
     private final long maxBatchSlotSize;
     private final long batchElementSize;
     private final long maxEntriesPerBatch;
@@ -111,10 +130,10 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
 
     private long arenaSize;
 
-    private AtomicLong walShardSequenceId =  new AtomicLong(0);
-
-    private final AtomicLong stampOffset = new AtomicLong(0);
-    private final AtomicLong readOffset = new AtomicLong(0);
+    private int stampStatus;
+    private long walSequenceId;
+    private long stampOffset;
+    private long readOffset;
 
     public WalEntryRecordBatchRingBufferHandler(
         MemorySegment memorySegment,
@@ -171,7 +190,7 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
     }
 
     public long batchChecksum() {
-        return ringBufferSegment.get(ValueLayout.JAVA_LONG, stampOffset.get() + BATCH_CHECKSUM_OFFSET);
+        return ringBufferSegment.get(ValueLayout.JAVA_LONG, stampOffset + BATCH_CHECKSUM_OFFSET);
     }
 
     public void setBatchChecksum(long batchOffset, long checkSum) {
@@ -179,7 +198,7 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
     }
 
     public void setBatchChecksum(long checkSum) {
-        ringBufferSegment.set(ValueLayout.JAVA_LONG, stampOffset.get() + BATCH_CHECKSUM_OFFSET, checkSum);
+        ringBufferSegment.set(ValueLayout.JAVA_LONG, stampOffset + BATCH_CHECKSUM_OFFSET, checkSum);
     }
 
     @Override
@@ -189,9 +208,13 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
         );
     }
 
+    public long batchSize(long batchOffset, long entriesCount) {
+        return EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE * entriesCount + BATCH_HEADER_SIZE;
+    }
+
     public long batchSize() {
         return entriesCountBatchSize(
-            ringBufferSegment.get(ValueLayout.JAVA_INT, stampOffset.get() + BATCH_ENTRIES_COUNT_OFFSET)
+            ringBufferSegment.get(ValueLayout.JAVA_INT, stampOffset + BATCH_ENTRIES_COUNT_OFFSET)
         );
     }
 
@@ -201,7 +224,7 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
     }
 
     public long batchElementsCount() {
-        return ringBufferSegment.get(ValueLayout.JAVA_INT, stampOffset.get() + BATCH_ENTRIES_COUNT_OFFSET);
+        return ringBufferSegment.get(ValueLayout.JAVA_INT, stampOffset + BATCH_ENTRIES_COUNT_OFFSET);
     }
 
     public long batchTotalAmount(long batchOffset) {
@@ -209,47 +232,48 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
     }
 
     public long batchTotalAmount() {
-        return ringBufferSegment.get(ValueLayout.JAVA_INT, stampOffset.get() + BATCH_TOTAL_AMOUNT_OFFSET);
+        return ringBufferSegment.get(ValueLayout.JAVA_INT, stampOffset + BATCH_TOTAL_AMOUNT_OFFSET);
     }
 
 //    private long slotOffset(long batchIndex) {
 
-    public long nextWalShardSequenceId() {
-        return this.walShardSequenceId.getAndIncrement();
+    public long nextWalSequenceId() {
+        return (long) WAL_SEQUENCE_ID_MEMORY_BARRIER.getAndAddRelease(this, 1);
     }
 
     /// /        return METADATA_SIZE + ((batchIndex % maxBatches) * batchSlotSize);
 //        final long slotOffset = batchIndex * batchSlotSize;
 //        return METADATA_SIZE + (batchIndex % maxBatches) * batchSlotSize);
 //    }
-    public boolean tryProcessBatch(BatchProcessor batchProcessor) {
-        long currentReadOffset = readOffset.get();
-        long currentStampOffset = stampOffset.get();
+    public long tryProcessBatch(BatchProcessor batchProcessor) {
+        long currentStampOffset = (long) STAMP_OFFSET_MEMORY_BARRIER.getAcquire(this);
+        long startReadOffset = (long) READ_OFFSET_MEMORY_BARRIER.get(this);
 
         // Проверяем есть ли данные
-        if (currentReadOffset >= currentStampOffset) {
-            return false;
+        if (startReadOffset >= currentStampOffset) {
+            return -1;
         }
 
         // Пытаемся занять слот для чтения
-        currentReadOffset = readOffset.incrementAndGet();
+        final long currentReadOffset = (long) READ_OFFSET_MEMORY_BARRIER.getAndAdd(this, 1);
 //        if (!readIndex.compareAndSet(currentReadOffset, currentReadOffset + 1)) {
 //            return false;
 //        }
 
         try {
             long batchSlotOffset = currentReadOffset;//currentBatchOffset;
+            long batchSize = batchSize(batchSlotOffset);
 
             // ✅ Обрабатываем batch
-            final boolean processed = batchProcessor.processBatch(this, batchSlotOffset, batchSize(batchSlotOffset));
+            final long processed = batchProcessor.processBatch(this, batchSlotOffset, batchSize);
 
-            if (processed) {
+            if (processed == batchSize) {
                 // ✅ Очищаем slot для переиспользования
                 // clearBatchSlot(batchSlotOffset);
                 log.debug("Successfully processed and cleared batch at slot {}", currentReadOffset);
             } else {
                 // Откатываем read index если обработка не удалась
-                readOffset.compareAndSet(currentReadOffset + 1, currentReadOffset);
+                READ_OFFSET_MEMORY_BARRIER.setRelease(this, startReadOffset);
                 log.warn("Failed to process batch at slot {}, rolling back", currentReadOffset);
             }
 
@@ -257,7 +281,7 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
 
         } catch (Exception e) {
             // Откатываем read index при ошибке
-            readOffset.compareAndSet(currentReadOffset + 1, currentReadOffset);
+            READ_OFFSET_MEMORY_BARRIER.setRelease(this, startReadOffset);
             log.error("Error consuming batch at slot {}", currentReadOffset, e);
             throw new RuntimeException("Failed to consume batch", e);
         }
@@ -265,26 +289,27 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
 
     private long tryStampBatch(
         long walSequenceId,
-        UUID accountId,
+//        UUID accountId,
         EntryRecordBatchHandler entryRecordBatchHandler,
         int entriesCount,
-        long entriesOffset,
-        long totalAmount
+        long entriesOffset
+//        long totalAmount
     ) {
         final long postgresBatchSize = (long) entriesCount * EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE;
 //        final long walBatchSize = postgresBatchSize + BATCH_HEADER_SIZE;
-        final long currentStampOffset = METADATA_SIZE + stampOffset.get();
+        final long startStampOffset = METADATA_SIZE + (long) STAMP_OFFSET_MEMORY_BARRIER.getAcquire(this);
 //        long currentReadOffset = readOffset.get();
 //        final long batchSlotOffset = METADATA_SIZE + currentStampOffset;
 
         try {
 //            currentStampOffset = stampOffset.incrementAndGet();
+            final long currentStampOffset = (long) STAMP_OFFSET_MEMORY_BARRIER.getAndAdd(this, 1);
 
 //        if (!writeIndex.compareAndSet(currentWriteIndex, currentWriteIndex + 1)) {
 //            log.trace("Failed to acquire write slot, another thread got it");
 //            return false;
 //        }
-            STAMP_MEMORY_BARRIER_STATUS.setRelease(ringBufferSegment, currentStampOffset, MemoryBarrierOperationStatus.HANDLING);
+            STAMP_STATUS_MEMORY_BARRIER.setRelease(this, MemoryBarrierOperationStatus.HANDLING.memoryOrdinal());
             //long slotOffset = slotOffset(currentStampOffset);
 
 //            if (batchesCount >= this.maxBatchesPerFile
@@ -303,10 +328,10 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
             writeWalBatchHeader(
                 currentStampOffset,
                 walSequenceId,
-                accountId,
+//                accountId,
                 entriesCount,
                 postgresBatchSize,
-                totalAmount,
+//                totalAmount,
                 entriesOffset
             );
             copyPostgreSQLData(
@@ -344,14 +369,14 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
 
             VarHandle.releaseFence();
 
-            STAMP_MEMORY_BARRIER_STATUS.setRelease(ringBufferSegment, currentStampOffset, MemoryBarrierOperationStatus.COMPLETED);
+            STAMP_STATUS_MEMORY_BARRIER.setRelease(this, MemoryBarrierOperationStatus.COMPLETED.memoryOrdinal());
 
-            log.debug("Successfully published batch for account {}: {} entries", accountId, entriesCount);
+//            log.debug("Successfully published batch for account {}: {} entries", accountId, entriesCount);
             return entriesCountBatchSize(entriesCount);
         } catch (Exception exception) {
             // Откатываем write index при ошибке
-            stampOffset.compareAndSet(currentStampOffset + 1, currentStampOffset);
-            log.error("Error publishing batch for account {}", accountId, exception);
+            STAMP_OFFSET_MEMORY_BARRIER.setRelease(this, startStampOffset);
+//            log.error("Error publishing batch for account {}", accountId, exception);
             throw new RuntimeException("Failed to publish batch", exception);
         }
     }
@@ -371,19 +396,19 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
     private void writeWalBatchHeader(
         long offset,
         long walSequenceId,
-        UUID accountId,
+//        UUID accountId,
         int entriesCount,
         long dataSize,
-        long totalAmount,
+//        long totalAmount,
         long entriesOffset
     ) {
         ringBufferSegment.set(ValueLayout.JAVA_LONG, offset + BATCH_WAL_SEQUENCE_OFFSET, walSequenceId);
         ringBufferSegment.set(ValueLayout.JAVA_LONG, offset + WAL_BATCH_SHARD_ID_OFFSET, shardId);
-        ringBufferSegment.set(ValueLayout.JAVA_LONG, offset + BATCH_ACCOUNT_ID_MSB_OFFSET, accountId.getMostSignificantBits());
-        ringBufferSegment.set(ValueLayout.JAVA_LONG, offset + BATCH_ACCOUNT_ID_LSB_OFFSET, accountId.getLeastSignificantBits());
+//        ringBufferSegment.set(ValueLayout.JAVA_LONG, offset + BATCH_ACCOUNT_ID_MSB_OFFSET, accountId.getMostSignificantBits());
+//        ringBufferSegment.set(ValueLayout.JAVA_LONG, offset + BATCH_ACCOUNT_ID_LSB_OFFSET, accountId.getLeastSignificantBits());
         ringBufferSegment.set(ValueLayout.JAVA_INT, offset + BATCH_ENTRIES_COUNT_OFFSET, entriesCount);
         ringBufferSegment.set(ValueLayout.JAVA_INT, offset + BATCH_DATA_SIZE_OFFSET, (int) dataSize);
-        ringBufferSegment.set(ValueLayout.JAVA_LONG, offset + BATCH_TOTAL_AMOUNT_OFFSET, totalAmount);
+//        ringBufferSegment.set(ValueLayout.JAVA_LONG, offset + BATCH_TOTAL_AMOUNT_OFFSET, totalAmount);
         ringBufferSegment.set(ValueLayout.JAVA_LONG, offset + BATCH_ENTRIES_OFFSET_OFFSET, entriesOffset);
         ringBufferSegment.set(ValueLayout.JAVA_LONG, offset + BATCH_TIMESTAMP_OFFSET, LocalDateTime.now().toInstant(ZoneOffset.UTC).toEpochMilli());
     }
@@ -411,8 +436,9 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
 ////        long totalFileSize
 //    ) {
 //        ringBufferSegment.set(ValueLayout.JAVA_INT, currentSlotOffset + FILE_BATCH_ACCOUNT_COUNT_OFFSET, batchEntriesCount);
-////        ringBufferSegment.set(ValueLayout.JAVA_INT, currentSlotOffset + FILE_BATCH_TOTAL_OPERATIONS_OFFSET, totalEntriesCount);
-////        ringBufferSegment.set(ValueLayout.JAVA_INT, currentSlotOffset + FILE_BATCH_TOTAL_SIZE_OFFSET, (int) totalFileSize);
+
+    /// /        ringBufferSegment.set(ValueLayout.JAVA_INT, currentSlotOffset + FILE_BATCH_TOTAL_OPERATIONS_OFFSET, totalEntriesCount);
+    /// /        ringBufferSegment.set(ValueLayout.JAVA_INT, currentSlotOffset + FILE_BATCH_TOTAL_SIZE_OFFSET, (int) totalFileSize);
 //    }
 
 //    private void finalizeCurrentFileBatch(long currentBatchSize) {
@@ -442,7 +468,6 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
 //        log.debug("Finalized WAL file batch: shard={}, id={}, accounts={}, operations={}, size={} bytes",
 //            shardId, currentFileBatchId, currentAccountBatchCount, currentTotalOperations, currentFileBatchSize);
 //    }
-
     private long alignToCache(long size) {
         return (size + CPU_CACHE_LINE_SIZE - 1) & -CPU_CACHE_LINE_SIZE;
     }
@@ -464,8 +489,9 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
 //            copySize
 //        );
 //
-////        log.trace("Copied {} PostgreSQL binary records ({} bytes) to batch slot",
-////            entryCount, copySize);
+
+    /// /        log.trace("Copied {} PostgreSQL binary records ({} bytes) to batch slot",
+    /// /            entryCount, copySize);
 //    }
 
 //    private void writePostgresTerminator(long batchSlotOffset, int entriesCount) {
@@ -475,7 +501,6 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
 //        // PostgreSQL binary format terminator
 //        ringBufferSegment.set(ValueLayout.JAVA_SHORT, terminatorOffset, (short) -1);
 //    }
-
     private long calculateBatchChecksum(long batchSlotOffset, int entriesCount) {
         long checksum = 0;
         long dataOffset = batchSlotOffset + BATCH_BODY_OFFSET;
@@ -497,7 +522,7 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
 
     private long entriesCountBatchSize(int entriesCount) {
         return BATCH_HEADER_SIZE
-            + (entriesCount + EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE)
+            + ((long) entriesCount * EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE)
             + 2;
     }
 
@@ -508,27 +533,27 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
 
     public boolean stampBatchForwardPassBarrier(
         long walShardSequenceId,
-        UUID accountId,
+//        UUID accountId,
         EntryRecordBatchHandler entryRecordBatchHandler,
         long entriesOffset,
-        int entriesCount,
-        long totalAmount
+        int entriesCount
+//        long totalAmount
     ) {
-        final long beforeForwardOffset = stampOffset.getAndAccumulate(
-            entriesCount * this.batchElementSize,
-            (currentOffset, increment) -> {
-                long newOffset = currentOffset + increment;
-                return newOffset >= arenaSize ? 0 : newOffset;
-            }
-        );
+//        final long beforeForwardOffset = stampOffset.getAndAccumulate(
+//            entriesCount * this.batchElementSize,
+//            (currentOffset, increment) -> {
+//                long newOffset = currentOffset + increment;
+//                return newOffset >= arenaSize ? 0 : newOffset;
+//            }
+//        );
 
         final long entriesBatchSize = tryStampBatch(
             walShardSequenceId,
-            accountId,
+//            accountId,
             entryRecordBatchHandler,
             entriesCount,
-            entriesOffset,
-            totalAmount
+            entriesOffset
+//            totalAmount
         );
 /*
         long walSequenceId,
@@ -541,7 +566,7 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
         long totalAmount
 
  */
-        offsetForward(entriesBatchSize);
+        offsetForward();
         return offsetBarrierPassed(entriesBatchSize);
 
 //        return barrier;
@@ -551,14 +576,29 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
 //        offset = offset + ENTRY_SIZE;
     }
 
+    public void offsetForward() {
+        final long batchRawSize = batchSize(stampOffset);
+        if (stampOffset + batchRawSize >= arenaSize) {
+            stampOffset = 0;
+        } else {
+            stampOffset = stampOffset + batchRawSize;
+        }
+    }
+
     public void offsetForward(long entriesCount) {
-        stampOffset.accumulateAndGet(
-            entriesCount * this.batchElementSize,
-            (currentOffset, increment) -> {
-                long newOffset = currentOffset + increment;
-                return newOffset >= arenaSize ? 0 : newOffset;
-            }
-        );
+        final long batchRawSize = batchSize(stampOffset, entriesCount);
+        if (stampOffset + batchRawSize >= arenaSize) {
+            stampOffset = 0;
+        } else {
+            stampOffset = stampOffset + batchRawSize;
+        }
+//        stampOffset.accumulateAndGet(
+//            entriesCount * this.batchElementSize,
+//            (currentOffset, increment) -> {
+//                long newOffset = currentOffset + increment;
+//                return newOffset >= arenaSize ? 0 : newOffset;
+//            }
+//        );
 //        final long length = entryRecordCount * this.batchSize() + BATCH_BODY_OFFSET;
 //        if (stampOffset + batchRawSize >= arenaSize) {
 //            offset = 0;
@@ -571,16 +611,44 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
     public boolean offsetBarrierPassed(long entriesCount) {
 //        final long length = entryRecordCount * this.batchSize() + BATCH_BODY_OFFSET;
 //        return offset == 0 || (offset + batchRawSize) == (arenaSize >> 1);
-        final long offset = stampOffset.get();
+        final long offset = (long) STAMP_OFFSET_MEMORY_BARRIER.getAcquire(this);
         return offset == 0 || (offset + (this.batchElementSize * entriesCount) + BATCH_HEADER_SIZE) == (arenaSize >> 1);
     }
 
+//    public long batchSize(long batchOffset) {
+//        return entriesCountBatchSize(
+//            ringBufferSegment.get(ValueLayout.JAVA_INT, batchOffset + BATCH_ENTRIES_COUNT_OFFSET)
+//        );
+//    }
+
+//    @Override
+//    public long batchElementsCount(long batchOffset) {
+//        return ringBufferSegment.get(ValueLayout.JAVA_INT, batchOffset + BATCH_ENTRIES_COUNT_OFFSET);
+//    }
+
+    public long passedBarrierOffset() {
+        final long arenaHalfSize = arenaSize >> 1;
+        final long offset = (long) STAMP_OFFSET_MEMORY_BARRIER.getAcquire(this);
+        if (offset >= arenaHalfSize) {
+            return arenaHalfSize;
+        }
+        return 0;
+    }
+
+    public int barrierPassedEntriesCount(long dataSize) {
+        final long arenaHalfSize = arenaSize >> 1;
+        if (stampOffset >= arenaHalfSize) {
+            return (int) (dataSize - arenaHalfSize) / EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE;
+        }
+        return (int) dataSize / EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE;
+    }
+
     public void resetStampOffset() {
-        stampOffset.set(0);
+        STAMP_OFFSET_MEMORY_BARRIER.setRelease(this, 0);
     }
 
     public void resetReadOffset() {
-        readOffset.set(0);
+        READ_OFFSET_MEMORY_BARRIER.setRelease(this, 0);
     }
 
     public String getDiagnostics() {

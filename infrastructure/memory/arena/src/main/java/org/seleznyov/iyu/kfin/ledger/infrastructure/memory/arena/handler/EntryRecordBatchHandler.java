@@ -5,12 +5,17 @@ import lombok.experimental.Accessors;
 import lombok.extern.slf4j.Slf4j;
 import org.seleznyov.iyu.kfin.ledger.domain.model.entryrecord.EntryRecord;
 import org.seleznyov.iyu.kfin.ledger.domain.model.entryrecord.EntryType;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.ArenaUuidMap;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.configuration.LedgerConfiguration;
 
+import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.charset.StandardCharsets;
 import java.time.*;
 import java.time.temporal.ChronoUnit;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
 
 @Slf4j
@@ -24,7 +29,7 @@ public class EntryRecordBatchHandler {
 
     // ===== PostgreSQL binary record structure =====
 
-    private static final int FIELD_COUNT_OFFSET = 0;                    // 2 bytes (short)
+    private static final int FIELD_COUNT_OFFSET = 0;
     private static final ValueLayout FIELD_COUNT_TYPE = ValueLayout.JAVA_SHORT;
 
     // Field 1: ID (UUID)
@@ -78,7 +83,7 @@ public class EntryRecordBatchHandler {
     private static final ValueLayout ORDINAL_TYPE = ValueLayout.JAVA_LONG;
 
     private static final int WAL_SEQUENCE_ID_LENGTH_OFFSET = (int) (ORDINAL_OFFSET + ORDINAL_TYPE.byteSize());
-    private static final int WAL_SEQUENCE_ID_OFFSET = (int) (WAL_SEQUENCE_ID_LENGTH_OFFSET + LENGTH_TYPE.byteSize());
+    public static final int WAL_SEQUENCE_ID_OFFSET = (int) (WAL_SEQUENCE_ID_LENGTH_OFFSET + LENGTH_TYPE.byteSize());
     private static final ValueLayout WAL_SEQUENCE_ID_TYPE = ValueLayout.JAVA_LONG;
 
     private static final int POSTGRES_ENTRY_RECORD_RAW_SIZE = (int) (WAL_SEQUENCE_ID_OFFSET + WAL_SEQUENCE_ID_TYPE.byteSize());
@@ -86,32 +91,33 @@ public class EntryRecordBatchHandler {
     public static final int POSTGRES_ENTRY_RECORD_SIZE = (POSTGRES_ENTRY_RECORD_RAW_SIZE + CPU_CACHE_LINE_SIZE - 1) & -CPU_CACHE_LINE_SIZE;
 
     private final MemorySegment memorySegment;
-    private final UUID entriesAccountId;
+//    private final UUID entriesAccountId;
 
+    private final ArenaUuidMap accountsBalanceMap;
+    private final ArenaUuidMap accountsEntriesCountMap;
     private long walShardSequenceId;
     private long offset;
     private long arenaSize;
     private long passedBarrierBatchAmount = 0;
     private long passedBarrierBatchAmountAccumulator = 0;
-    private long totalAmount = 0;
     private long operationsCount = 0;
     private long startEpochMillis = 0;
     private long minutesSinceEpoch = 0;
     private long entryOrdinal = 0;
+    private long actualAccountsCount = 0;
     private volatile long lastAccessTime;
 //    private final MemoryLayout memoryLayout;
 
     public EntryRecordBatchHandler(
         MemorySegment memorySegment,
-        UUID accountId,
-        long totalAmount,
-        long lastAccessTime,
-        long walShardSequenceId
+        long walShardSequenceId,
+        LedgerConfiguration ledgerConfiguration
     ) {
         this.walShardSequenceId = walShardSequenceId;
-        this.entriesAccountId = accountId;
         this.memorySegment = memorySegment;
-        this.totalAmount = totalAmount;
+        final Arena balancesArena = Arena.ofConfined();
+        this.accountsBalanceMap = new ArenaUuidMap(balancesArena, ledgerConfiguration.hotAccounts().maxCount());
+        this.accountsEntriesCountMap = new ArenaUuidMap(balancesArena, ledgerConfiguration.hotAccounts().maxCount());
         this.offset = 0;
         this.arenaSize = memorySegment.byteSize();
         this.lastAccessTime = lastAccessTime;
@@ -128,8 +134,20 @@ public class EntryRecordBatchHandler {
 //        );
     }
 
-    public long totalAmount() {
-        return totalAmount;
+    public long totalAmount(UUID accountId) {
+        return accountsBalanceMap.get(accountId);
+    }
+
+    public void resetTotalAmount(UUID accountId) {
+        accountsBalanceMap.put(accountId, 0);
+    }
+
+    public long entriesCount(UUID accountId) {
+        return accountsEntriesCountMap.get(accountId);
+    }
+
+    public void resetEntriesCount(UUID accountId) {
+        accountsEntriesCountMap.put(accountId, 0);
     }
 
     public long operationsCount() {
@@ -163,6 +181,20 @@ public class EntryRecordBatchHandler {
             offset + ENTRY_TYPE_OFFSET,
             entryType.shortFromEntryType()
         );
+    }
+
+    public void registerAccount(UUID accountId, long balance) {
+        actualAccountsCount++;
+        final long offset = actualAccountsCount << 3;
+        accountsBalanceMap.put(accountId, balance);
+    }
+
+    public void accountBalance(UUID accountId, long balance) {
+        accountsBalanceMap.put(accountId, balance);
+    }
+
+    public long accountBalance(UUID accountId) {
+        return accountsBalanceMap.get(accountId);
     }
 
     public long amount() {
@@ -304,25 +336,32 @@ public class EntryRecordBatchHandler {
 
     public long passedBarrierOffset() {
         final long arenaHalfSize = arenaSize >> 1;
-        if (offset == arenaHalfSize) {
-            return 0;
+        if (offset >= arenaHalfSize) {
+            return arenaHalfSize;
         }
-        return arenaHalfSize;
+        return 0;
     }
 
     public int barrierPassedEntriesCount() {
         final long arenaHalfSize = arenaSize >> 1;
-        if (offset == arenaHalfSize) {
-            return (int) (arenaSize - arenaHalfSize) / POSTGRES_ENTRY_RECORD_SIZE;
+        if (offset >= arenaHalfSize) {
+            return (int) (offset - arenaHalfSize) / POSTGRES_ENTRY_RECORD_SIZE;
         }
-        return (int) arenaHalfSize / POSTGRES_ENTRY_RECORD_SIZE;
+        return (int) (offset) / POSTGRES_ENTRY_RECORD_SIZE;
     }
 
     public boolean stampEntryRecordForwardPassBarrier(EntryRecord entryRecord) {
         stampEntryRecord(entryRecord);
         offsetForward();
         passedBarrierBatchAmountAccumulator += entryRecord.amount();
-        totalAmount += entryRecord.amount();
+        accountsBalanceMap.put(
+            entryRecord.accountId(),
+            accountsBalanceMap.get(entryRecord.accountId()) + entryRecord.amount()
+        );
+        accountsEntriesCountMap.put(
+            entryRecord.accountId(),
+            accountsEntriesCountMap.get(entryRecord.accountId()) + 1
+        );
         operationsCount++;
         entryOrdinal++;
         if (entryOrdinal == Long.MAX_VALUE) {

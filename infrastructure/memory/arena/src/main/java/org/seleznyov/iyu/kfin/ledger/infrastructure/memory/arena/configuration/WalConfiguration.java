@@ -7,10 +7,11 @@ public record WalConfiguration (
     long maxFileSizeMb,
     String walFilePrefix,
     String checkpointFilePrefix,
-    long maxBatchEntriesCount,
+    long batchEntriesCount,
     long ringBufferBatchesCount,
     long minWalFlushIntervalMs,
-    long maxWalFlushIntervalMs
+    long maxWalFlushIntervalMs,
+    int workerThreadsCount
 ) {
 
 }
