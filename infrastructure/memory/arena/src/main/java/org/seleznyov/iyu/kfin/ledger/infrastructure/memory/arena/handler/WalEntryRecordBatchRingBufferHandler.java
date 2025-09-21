@@ -245,6 +245,10 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
         return (long) WAL_SEQUENCE_ID_MEMORY_BARRIER.getAndAddRelease(this, 1);
     }
 
+//    public long readOffset() {
+//        return (long) READ_OFFSET_MEMORY_BARRIER.getAndAddRelease(this, 1);
+//    }
+
     /// /        return METADATA_SIZE + ((batchIndex % maxBatches) * batchSlotSize);
 //        final long slotOffset = batchIndex * batchSlotSize;
 //        return METADATA_SIZE + (batchIndex % maxBatches) * batchSlotSize);
@@ -299,15 +303,20 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
         long entriesOffset
 //        long totalAmount
     ) {
-        final long postgresBatchSize = (long) entriesCount * EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE;
+        final long walBatchSize = (long) entriesCount * EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE;
 //        final long walBatchSize = postgresBatchSize + BATCH_HEADER_SIZE;
-        final long startStampOffset = METADATA_SIZE + (long) STAMP_OFFSET_MEMORY_BARRIER.getAcquire(this);
+        final long currentReadOffset = (long) READ_OFFSET_MEMORY_BARRIER.getAcquire(this);
+        final long startStampOffset = METADATA_SIZE + (long) STAMP_OFFSET_MEMORY_BARRIER.get(this);
 //        long currentReadOffset = readOffset.get();
 //        final long batchSlotOffset = METADATA_SIZE + currentStampOffset;
 
+        if (startStampOffset >= currentReadOffset) {
+            return -1;
+        }
+
         try {
 //            currentStampOffset = stampOffset.incrementAndGet();
-            final long currentStampOffset = (long) STAMP_OFFSET_MEMORY_BARRIER.getAndAdd(this, 1);
+            final long currentStampOffset = (long) STAMP_OFFSET_MEMORY_BARRIER.getAndAdd(this, walBatchSize);
 
 //        if (!writeIndex.compareAndSet(currentWriteIndex, currentWriteIndex + 1)) {
 //            log.trace("Failed to acquire write slot, another thread got it");
@@ -334,7 +343,7 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
                 walSequenceId,
 //                accountId,
                 entriesCount,
-                postgresBatchSize,
+                walBatchSize,
 //                totalAmount,
                 entriesOffset
             );

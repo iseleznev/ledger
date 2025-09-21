@@ -13,19 +13,6 @@ import java.util.concurrent.locks.LockSupport;
 public class HotAccountWalWorker {
     static final String STAGE_TABLE_NAME_PREFIX = "stage_record_entry";
 
-//    private static final VarHandle WAL_READ_OFFSET_MEMORY_BARRIER;
-//
-//    static {
-//        try {
-//            MethodHandles.Lookup lookup = MethodHandles.lookup();
-//            // Для статических полей
-//            WAL_READ_OFFSET_MEMORY_BARRIER = lookup.findVarHandle(
-//                HotAccountWalWorker.class, "readOffset", long.class);
-//        } catch (Exception e) {
-//            throw new ExceptionInInitializerError(e);
-//        }
-//    }
-
     private final WalEntryRecordBatchRingBufferHandler walRingBuffer;
     private final WalBatchWriter walBatchWriter;
     private final WalConfiguration walConfiguration;
@@ -33,7 +20,6 @@ public class HotAccountWalWorker {
     private final int workerId;
     private final Thread workerThread;
     private volatile boolean isRunning;
-    private long readOffset = 0;
 
     public HotAccountWalWorker(
         int workerId,
@@ -105,6 +91,7 @@ public class HotAccountWalWorker {
 
         while (isRunning) {
             try {
+                final long readOffset = walRingBuffer.readOffset();
                 final long batchSize = walRingBuffer.batchSize(readOffset);
                 final long walSequenceId = walRingBuffer.walSequenceId(readOffset);
                 //final long ringBufferReadOffset = WAL_READ_OFFSET_MEMORY_BARRIER.getAndAddRelease(this, batchSize);
@@ -115,8 +102,8 @@ public class HotAccountWalWorker {
                     readOffset,
                     batchSize
                 );
-                if (writtenSize > batchSize) {
-                    readOffset += batchSize;
+                if (writtenSize == batchSize) {
+                    walRingBuffer.readOffset(readOffset + writtenSize);
                     emptyIterations = 0;
                 } else {
                     // Нет данных - короткая пауза

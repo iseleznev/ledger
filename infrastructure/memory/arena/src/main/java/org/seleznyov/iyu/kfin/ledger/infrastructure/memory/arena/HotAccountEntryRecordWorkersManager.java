@@ -234,7 +234,7 @@ public class HotAccountEntryRecordWorkersManager {
 //            }
 
 
-        } catch (Exception e) {
+        } catch (Exception ) {
             log.error("Failed to create segment for account {}", accountId, e);
             throw new RuntimeException("Segment creation failed for account " + accountId, e);
         }
