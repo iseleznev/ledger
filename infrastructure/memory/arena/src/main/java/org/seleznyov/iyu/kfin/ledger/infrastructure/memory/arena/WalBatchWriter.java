@@ -5,7 +5,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.configuration.WalConfiguration;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.BatchRingBufferHandler;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.EntryRecordBatchHandler;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.processor.batchprocessor.BatchProcessor;
 
 import java.io.IOException;
 import java.lang.foreign.MemorySegment;
@@ -26,7 +25,7 @@ public class WalBatchWriter {
 
     //LEDGERPX
     private static final long WAL_MAGIC = ByteBuffer.wrap(
-        new byte[] {76, 69, 68, 71, 69, 82, 80, 88}
+        new byte[]{76, 69, 68, 71, 69, 82, 80, 88}
     ).getLong();
 
     private static final long WAL_MAGIC_PREFIX_OFFSET = 0;
@@ -66,12 +65,11 @@ public class WalBatchWriter {
     private final WalConfiguration configuration;
     private final long maxFileSize;
 
-    private long sequenceId = 0;
+//    private long sequenceId = 0;
 
     public WalBatchWriter(
         WalConfiguration configuration,
         int shardId,
-        long sequenceId,
         long walFileOffset
     ) {
         this.shardId = shardId;
@@ -89,7 +87,7 @@ public class WalBatchWriter {
             )
         );
         this.maxFileSize = configuration.maxFileSizeMb() * 1024 * 1024;
-        this.sequenceId = sequenceId;
+//        this.sequenceId = sequenceId;
         this.walFileOffset.set(walFileOffset);
     }
 
@@ -139,9 +137,13 @@ public class WalBatchWriter {
         }
     }
 
-    public long processBatch(BatchRingBufferHandler ringBufferHandler, long batchSlotOffset, long batchRawSize) {
+    public long writeBatch(
+        BatchRingBufferHandler ringBufferHandler,
+        long walSequenceId,
+        long batchSlotOffset,
+        long batchRawSize
+    ) {
         try {
-
             final long fileOffset = walFileOffset.getAndAdd(batchRawSize + HEADER_SIZE);
 
             if (walFileOffset.get() >= maxFileSize) {
@@ -153,7 +155,7 @@ public class WalBatchWriter {
             if (batchRawSize - HEADER_SIZE <= maxFileSize) {
                 final MemorySegment memorySegment = ringBufferHandler.ringBufferSegment().asSlice(batchSlotOffset, batchRawSize);
                 writeBuffer.putLong(WAL_MAGIC);
-                writeBuffer.putLong(sequenceId);
+                writeBuffer.putLong(walSequenceId);
                 writeBuffer.putLong(EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE);
                 writeBuffer.putLong(batchRawSize / EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE);
                 writeBuffer.put(HEADER_PADDING);
@@ -168,7 +170,7 @@ public class WalBatchWriter {
                 }
 
                 writeBuffer.clear();
-                writeBuffer.putLong(sequenceId);
+                writeBuffer.putLong(walSequenceId);
                 writeBuffer.putLong(fileOffset);
                 writeBuffer.put(CHECKPOINT_PADDING);
                 writeBuffer.flip();
@@ -186,7 +188,7 @@ public class WalBatchWriter {
 
                 writeBuffer.clear();
                 writeBuffer.putLong(WAL_MAGIC);
-                writeBuffer.putLong(sequenceId);
+                writeBuffer.putLong(walSequenceId);
                 writeBuffer.putLong(EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE);
                 writeBuffer.putLong(batchRawSize / EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE);
                 writeBuffer.put(HEADER_PADDING);
@@ -211,7 +213,7 @@ public class WalBatchWriter {
                 }
 
                 writeBuffer.clear();
-                writeBuffer.putLong(sequenceId);
+                writeBuffer.putLong(walSequenceId);
                 writeBuffer.putLong(fileOffset);
                 writeBuffer.put(CHECKPOINT_PADDING);
                 writeBuffer.flip();
