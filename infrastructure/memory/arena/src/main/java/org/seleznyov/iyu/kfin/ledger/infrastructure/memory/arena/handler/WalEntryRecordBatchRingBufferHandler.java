@@ -80,10 +80,10 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
 
     // ===== ACCOUNT BATCH HEADER (within file batch) =====
 
-    private static final int BATCH_WAL_SEQUENCE_OFFSET = FILE_BATCH_HEADER_SIZE;
-    private static final ValueLayout BATCH_WAL_SEQUENCE_TYPE = ValueLayout.JAVA_LONG;
+    private static final int BATCH_WAL_SEQUENCE_ID_OFFSET = FILE_BATCH_HEADER_SIZE;
+    private static final ValueLayout BATCH_WAL_SEQUENCE_ID_TYPE = ValueLayout.JAVA_LONG;
 
-    private static final int WAL_BATCH_SHARD_ID_OFFSET = (int) (BATCH_WAL_SEQUENCE_OFFSET + BATCH_WAL_SEQUENCE_TYPE.byteSize());
+    private static final int WAL_BATCH_SHARD_ID_OFFSET = (int) (BATCH_WAL_SEQUENCE_ID_OFFSET + BATCH_WAL_SEQUENCE_ID_TYPE.byteSize());
     private static final ValueLayout WAL_BATCH_SHARD_ID_TYPE = ValueLayout.JAVA_INT;
 
     private static final int BATCH_ACCOUNT_ID_MSB_OFFSET = (int) (WAL_BATCH_SHARD_ID_OFFSET + WAL_BATCH_SHARD_ID_TYPE.byteSize());
@@ -121,7 +121,7 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
 
     private final MemorySegment ringBufferSegment;
     private final int shardId;
-    private final int maxBatchesPerFile;
+    private final long maxBatchesPerFile;
     //    private long currentSlotOffset = METADATA_SIZE;
     private final long maxBatchSlotSize;
     private final long batchElementSize;
@@ -137,8 +137,8 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
 
     public WalEntryRecordBatchRingBufferHandler(
         MemorySegment memorySegment,
-        int maxEntriesPerBatch,
-        int maxBatchesPerFile,
+        long maxEntriesPerBatch,
+        long maxBatchesPerFile,
         int shardId
     ) {
         this.ringBufferSegment = memorySegment;
@@ -206,6 +206,10 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
         return entriesCountBatchSize(
             ringBufferSegment.get(ValueLayout.JAVA_INT, batchOffset + BATCH_ENTRIES_COUNT_OFFSET)
         );
+    }
+
+    public long walSequenceId(long batchOffset) {
+        return ringBufferSegment.get(ValueLayout.JAVA_LONG, batchOffset + BATCH_WAL_SEQUENCE_ID_OFFSET);
     }
 
     public long batchSize(long batchOffset, long entriesCount) {
@@ -402,7 +406,7 @@ public class WalEntryRecordBatchRingBufferHandler implements BatchRingBufferHand
 //        long totalAmount,
         long entriesOffset
     ) {
-        ringBufferSegment.set(ValueLayout.JAVA_LONG, offset + BATCH_WAL_SEQUENCE_OFFSET, walSequenceId);
+        ringBufferSegment.set(ValueLayout.JAVA_LONG, offset + BATCH_WAL_SEQUENCE_ID_OFFSET, walSequenceId);
         ringBufferSegment.set(ValueLayout.JAVA_LONG, offset + WAL_BATCH_SHARD_ID_OFFSET, shardId);
 //        ringBufferSegment.set(ValueLayout.JAVA_LONG, offset + BATCH_ACCOUNT_ID_MSB_OFFSET, accountId.getMostSignificantBits());
 //        ringBufferSegment.set(ValueLayout.JAVA_LONG, offset + BATCH_ACCOUNT_ID_LSB_OFFSET, accountId.getLeastSignificantBits());

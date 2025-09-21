@@ -11,7 +11,9 @@ public record WalConfiguration (
     long ringBufferBatchesCount,
     long minWalFlushIntervalMs,
     long maxWalFlushIntervalMs,
-    int workerThreadsCount
+    int workerThreadsCount,
+    long waitingEmptyRingBufferNanos,
+    int emptyIterationsYieldRetries
 ) {
 
 }
