@@ -5,6 +5,8 @@ public record PostgreSQLConfiguration(
     int stageTablesPerWorkerThreadCount,
     int ringBufferCopyBatchesCountCapacity,
     int directCopyBatchRecordsCount,
+    long waitingEmptyRingBufferNanos,
+    int emptyIterationsYieldRetries,
     String url,
     String databaseName,
     String username,

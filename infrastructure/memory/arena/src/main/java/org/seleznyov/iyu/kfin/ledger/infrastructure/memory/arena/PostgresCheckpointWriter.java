@@ -57,25 +57,16 @@ public class PostgresCheckpointWriter {
     private FileChannel checkpointFileChannel;
     private volatile boolean isOpen = false;
 
-    public PostgresCheckpointWriter(
-        WalConfiguration configuration,
-        int shardId,
-        long walFileOffset
-    ) {
+    public PostgresCheckpointWriter(String path, int shardId) {
         this.shardId = shardId;
 
 
         // Open first file
-        final Path walDirectory = Path.of(configuration.path());
-
-        this.walDirectory = walDirectory;
+        this.walDirectory = Path.of(path);
         this.writeBuffer = ByteBuffer.allocateDirect(
-            alignSize(
-                configuration.writeFileBufferSize(),
-                configuration.alignmentSize()
-            )
+            CHECKPOINT_PADDING.length
         );
-        this.walFileOffset.set(walFileOffset);
+//        this.walFileOffset.set(walFileOffset);
     }
 
     public void initialize(String filename) {
@@ -146,7 +137,7 @@ public class PostgresCheckpointWriter {
         log.debug(
             "Rotating WAL file: shard={}, currentSize={}",
             shardId,
-            walFileOffset.get()
+            checkpointFileChannel.size()
         );
 
         walFileSequence.incrementAndGet();

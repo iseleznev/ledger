@@ -5,7 +5,8 @@ public record LedgerEntriesConfiguration(
     int batchEntriesCount,
     boolean halfBatchBarrier,
     int entryRecordsCountToSnapshot,
-    int millisToSnapshot
+    int millisToSnapshot,
+    int workerBoundedQueueSize
 ) {
 
 }

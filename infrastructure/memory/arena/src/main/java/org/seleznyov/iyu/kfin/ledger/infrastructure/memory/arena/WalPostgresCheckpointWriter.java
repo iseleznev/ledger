@@ -11,10 +11,9 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.util.concurrent.atomic.AtomicLong;
 
 @Slf4j
-public class WalBatchCommitsCheckpointWriter {
+public class WalPostgresCheckpointWriter {
 
     private final static int CPU_CACHE_LINE_SIZE = 64;
 
@@ -41,7 +40,7 @@ public class WalBatchCommitsCheckpointWriter {
     private final ByteBuffer writeBuffer;
     private FileChannel checkpointFileChannel;
 
-    public WalBatchCommitsCheckpointWriter(
+    public WalPostgresCheckpointWriter(
         WalConfiguration configuration,
         int shardId
     ) {

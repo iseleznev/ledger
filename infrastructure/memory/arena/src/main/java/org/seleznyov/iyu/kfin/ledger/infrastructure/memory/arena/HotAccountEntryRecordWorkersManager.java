@@ -3,17 +3,14 @@ package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena;
 import lombok.extern.slf4j.Slf4j;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.configuration.LedgerConfiguration;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.EntryRecordBatchHandler;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.WalEntryRecordBatchRingBufferHandler;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.processor.EntryRecordBatchShardProcessor;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -21,7 +18,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * Each hot account gets its own isolated memory segment within a shared Arena
  */
 @Slf4j
-public class HotAccountArenaManager {
+public class HotAccountEntryRecordWorkersManager {
 
     // Configuration constants
 //    private static final long DEFAULT_SEGMENT_SIZE = 64 * 1024 * 1024; // 64MB per account
@@ -36,9 +33,9 @@ public class HotAccountArenaManager {
 //    private final long totalArenaSize;
 
     // Account segments registry
-    private final ConcurrentHashMap<Integer, EntryRecordBatchHandler> batchHandlers = new ConcurrentHashMap<>();
-    private final ExecutorService[] stripeExecutors;
-    private final ConcurrentHashMap<Integer, EntryRecordBatchShardProcessor> processors = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Integer, HotAccountEntryRecordWorker> workersMap;
+//    private final ExecutorService[] stripeExecutors;
+//    private final ConcurrentHashMap<Integer, HotAccountEntryRecordWorker> processors = new ConcurrentHashMap<>();
 
 //    private final ReentrantReadWriteLock cleanupLock = new ReentrantReadWriteLock();
 
@@ -46,11 +43,14 @@ public class HotAccountArenaManager {
     private final AtomicLong totalSegmentsCreated = new AtomicLong(0);
     private final AtomicLong totalSegmentsReleased = new AtomicLong(0);
     private final AtomicLong lastCleanupTime = new AtomicLong(System.currentTimeMillis());
+    private final StripeExceptionHandler exceptionHandler;
 
-    public HotAccountArenaManager(
-        LedgerConfiguration ledgerConfiguration
+    public HotAccountEntryRecordWorkersManager(
+        LedgerConfiguration ledgerConfiguration,
+        StripeExceptionHandler exceptionHandler
         //long totalArenaSizeGB, long segmentSizeMB, int stripeThreadsCount
     ) {
+        this.exceptionHandler = exceptionHandler;
 //        this.totalArenaSize =  //totalArenaSizeGB * 1024L * 1024L * 1024L;
 //        this.entriesBatchSize = segmentSizeMB * 1024L * 1024L;
 //        this.maxSegments = totalArenaSize / entriesBatchSize;
@@ -65,7 +65,8 @@ public class HotAccountArenaManager {
 
         this.sharedArena = Arena.ofShared();
 
-        this.stripeExecutors = new ExecutorService[ledgerConfiguration.hotAccounts().workerThreadsCount()];
+//        this.stripeExecutors = new ExecutorService[ledgerConfiguration.hotAccounts().workerThreadsCount()];
+        this.workersMap = new ConcurrentHashMap<>(ledgerConfiguration.hotAccounts().workerThreadsCount());
 
 //        log.info("Created SegmentedHotAccountArena: total_size={}GB, segment_size={}MB, max_segments={}",
 //            totalArenaSizeGB, segmentSizeMB / (1024 * 1024), maxSegments);
@@ -81,7 +82,7 @@ public class HotAccountArenaManager {
         }
 
         // Fast path - segment already exists
-        EntryRecordBatchHandler batchHandler = batchHandlers.get(accountId);
+        EntryRecordBatchHandler batchHandler = workersMap.get(accountId);
         if (batchHandler != null) {
             batchHandler.lastAccessTime(LocalDateTime.now().toInstant(ZoneOffset.UTC).toEpochMilli());
             return batchHandler;
@@ -97,7 +98,7 @@ public class HotAccountArenaManager {
 //                return batchHandler;
 //            }
             //TODO: получить сумму из базы данных
-            return initializeWorkers();
+            return initWorkers();
 
         } catch (Exception e) {
             log.error("Failed to get or create segment for account {}", accountId, e);
@@ -111,7 +112,11 @@ public class HotAccountArenaManager {
     /**
      * Creates a new memory segment and layout for the account
      */
-    public EntryRecordBatchHandler initializeWorkers(LedgerConfiguration ledgerConfiguration) {
+    public EntryRecordBatchHandler initWorkers(
+        LedgerConfiguration ledgerConfiguration,
+        Map<Integer, Long> walSequenceIdMap,
+        HotAccountPostgresWorkersManager postgresWorkersManager
+    ) {
 //        if (batchHandlers.size() >= maxSegments) {
         // Try cleanup first
 //            performCleanup(accountId);
@@ -128,7 +133,7 @@ public class HotAccountArenaManager {
         try {
             // Allocate memory segment from shared arena
             final MemorySegment memorySegment = sharedArena.allocate(
-                this.entriesBatchSize * stripeExecutors.length,
+                this.entriesBatchSize * workersMap.size(),
                 64// 64-byte aligned
             );
 
@@ -137,57 +142,97 @@ public class HotAccountArenaManager {
 //                accountId, memorySegment, handler, System.currentTimeMillis()
 //            );
 
-            // Register the segment
-            for (int i = 0; i < stripeExecutors.length; ++i) {
-                final int workerIndex = i;
+            // В вашем классе
+//            private static final int QUEUE_SIZE = 1000;
 
-                this.stripeExecutors[workerIndex] = Executors.newSingleThreadExecutor(runnable -> {
-                    Thread thread = Thread.ofPlatform()
-                        .name("account-stripe-" + workerIndex)
-                        .priority(Thread.NORM_PRIORITY + 1) // Повышенный приоритет
-                        .unstarted(runnable);
-
-                    // Настройки для финансового приложения
-                    thread.setUncaughtExceptionHandler((t, exception) -> {
-                            log.error("Uncaught exception in stripe {} thread: {}", workerIndex, t.getName(), exception);
-                            // Здесь можно добавить алертинг
-                        }
-                    );
-
-                    return thread;
-                });
-
-                final EntryRecordBatchHandler entriesBatchHandler = new EntryRecordBatchHandler(
-                    memorySegment.asSlice(this.entriesBatchSize * workerIndex, this.entriesBatchSize),
-                    walSequenceId,
-                    ledgerConfiguration
-                );
-
-                processors.put(
+// Инициализация
+            for (int workerIndex = 0; workerIndex < workersMap.size(); workerIndex++) {
+                workersMap.put(
                     workerIndex,
-                    new EntryRecordBatchShardProcessor(
-                        entriesBatchHandler,
-                        this.stripeExecutors[workerIndex],
+                    new HotAccountEntryRecordWorker(
+                        workerIndex,
+                        walSequenceIdMap.get(workerIndex),
+                        ledgerConfiguration,
+                        postgresWorkersManager,
 
-/*
-        EntryRecordBatchHandler entryRecordBatchHandler,
-        ExecutorService shardDedicatedExecutorService,
-        PostgreSqlEntryRecordBatchRingBufferHandler pgEntryRecordBatchRingBufferHandler,
+                        /*
+                                int workerId,
         EntriesSnapshotSharedBatchHandler snapshotSharedBatchHandler,
-        PostgreSqlEntriesSnapshotBatchRingBufferHandler snapshotBatchRingBufferHandler
+        PostgreSqlEntriesSnapshotBatchRingBufferHandler snapshotBatchRingBufferHandler,
+        WalEntryRecordBatchRingBufferHandler walEntryRecordBatchRingBufferHandler
 
- */
+                         */
                     )
                 );
 
-                batchHandlers.put(workerIndex, entriesBatchHandler);
-                totalSegmentsCreated.incrementAndGet();
-            }
+//                final BlockingQueue<Runnable> boundedQueue = new ArrayBlockingQueue<>(ledgerConfiguration.entries().workerBoundedQueueSize());
+//
+//                final ThreadFactory threadFactory = runnable -> {
+//                    Thread thread = Thread.ofPlatform()
+//                        .name("account-stripe-" + currentWorkerIndex)
+//                        .priority(Thread.NORM_PRIORITY + 1) // Повышенный приоритет
+//                        .unstarted(runnable);
+//
+//                    // Настройки для финансового приложения
+//                    thread.setUncaughtExceptionHandler(
+//                        exceptionHandler.createHandler(currentWorkerIndex)
+//                    );
+//
+//                    return thread;
+//                };
+//
+//                StripeQueueRejectionHandler rejectionHandler =
+//                    new StripeQueueRejectionHandler(currentWorkerIndex, alertingService, stripeMetrics);
+//
+//                // ThreadPoolExecutor с bounded queue
+//                this.stripeExecutors[currentWorkerIndex] = new ThreadPoolExecutor(
+//                    1, 1,                          // Ровно один поток
+//                    0L, TimeUnit.MILLISECONDS,     // Без keep-alive
+//                    boundedQueue,                  // Bounded queue на 1000 элементов
+//                    threadFactory,                 // Ваша ThreadFactory
+//                    rejectionHandler              // Custom rejection handler
+//                );
+//
+////                this.stripeExecutors[workerIndex] = new ThreadPoolExecutor(
+////                    1, 1,
+////                    0L, TimeUnit.MILLISECONDS,
+////                    new ArrayBlockingQueue<>(ledgerConfiguration.entries().workerBoundedQueueSize()),
+////                    runnable -> {
+////                        Thread thread = Thread.ofPlatform()
+////                            .name("account-stripe-" + currentWorkerIndex)
+////                            .priority(Thread.NORM_PRIORITY + 1)
+////                            .unstarted(runnable);
+////
+////                        thread.setUncaughtExceptionHandler(
+////                            exceptionHandler.createHandler(currentWorkerIndex)
+////                        );
+////
+////                        return thread;
+////                    },
+////                    (runnable, executor) -> {
+////                        log.warn(
+////                            "Stripe worker-{} queue overflow, executing in caller thread",
+////                            currentWorkerIndex
+////                        );
+////
+////                        if (!executor.isShutdown()) {
+////                            runnable.run(); // CallerRuns behavior
+////                        }
+////                    }
+////                );
+////                StripeQueueRejectionHandler rejectionHandler =
+////                    new StripeQueueRejectionHandler(currentWorkerIndex, alertingService, stripeMetrics);
+////
+////                // ThreadPoolExecutor с bounded queue
+////                this.stripeExecutors[currentWorkerIndex] = new ThreadPoolExecutor(
+////                    1, 1,                          // Ровно один поток
+////                    0L, TimeUnit.MILLISECONDS,     // Без keep-alive
+////                    boundedQueue,                  // Bounded queue на 1000 элементов
+////                    threadFactory,                 // Ваша ThreadFactory
+////                    rejectionHandler              // Custom rejection handler
+////                );
+//            }
 
-            log.debug("Created new segment for account {}: segment_size={}MB, total_active={}",
-                accountId, entriesBatchSize / (1024 * 1024), batchHandlers.size());
-
-            return entriesBatchHandler;
 
         } catch (Exception e) {
             log.error("Failed to create segment for account {}", accountId, e);
@@ -204,11 +249,11 @@ public class HotAccountArenaManager {
 
 //        cleanupLock.writeLock().lock();
         try {
-            final EntryRecordBatchHandler segment = batchHandlers.remove(accountId);
+            final EntryRecordBatchHandler segment = workersMap.remove(accountId);
             if (segment != null) {
                 totalSegmentsReleased.incrementAndGet();
                 log.debug("Manually released segment for account {}: total_active={}",
-                    accountId, batchHandlers.size());
+                    accountId, workersMap.size());
                 return true;
             }
             return false;
@@ -238,7 +283,7 @@ public class HotAccountArenaManager {
             int cleanedCount = 0;
             long cutoffTime = currentTime - IDLE_TIMEOUT_MS;
 
-            EntryRecordBatchHandler batchHandler = batchHandlers.remove(accountId);
+            EntryRecordBatchHandler batchHandler = workersMap.remove(accountId);
 
             cleanedCount++;
             totalSegmentsReleased.incrementAndGet();
@@ -248,7 +293,7 @@ public class HotAccountArenaManager {
             lastCleanupTime.set(currentTime);
 
             log.info("Cleanup completed: removed {} idle segments, active_segments={}",
-                cleanedCount, batchHandlers.size());
+                cleanedCount, workersMap.size());
         } catch (Exception e) {
             log.error("Failed to cleanup idle segment for account {}", accountId, e);
         }
@@ -261,7 +306,7 @@ public class HotAccountArenaManager {
      * Checks if account has an active segment
      */
     public boolean hasActiveSegment(UUID accountId) {
-        return batchHandlers.containsKey(accountId);
+        return workersMap.containsKey(accountId);
     }
 
     /**
@@ -274,7 +319,7 @@ public class HotAccountArenaManager {
                 .totalArenaSize(totalArenaSize)
                 .segmentSize(entriesBatchSize)
                 .maxSegments(maxSegments)
-                .activeSegments(batchHandlers.size())
+                .activeSegments(workersMap.size())
                 .totalSegmentsCreated(totalSegmentsCreated.get())
                 .totalSegmentsReleased(totalSegmentsReleased.get())
                 .memoryUtilization(calculateMemoryUtilization())
@@ -286,7 +331,7 @@ public class HotAccountArenaManager {
     }
 
     private double calculateMemoryUtilization() {
-        return (double) (batchHandlers.size() * entriesBatchSize) / totalArenaSize * 100.0;
+        return (double) (workersMap.size() * entriesBatchSize) / totalArenaSize * 100.0;
     }
 
     /**
@@ -308,13 +353,13 @@ public class HotAccountArenaManager {
      */
     public void shutdown() {
         log.info("Shutting down SegmentedHotAccountArena with {} active segments",
-            batchHandlers.size());
+            workersMap.size());
 
 //        cleanupLock.writeLock().lock();
         try {
             // Clear all active segments
-            int segmentCount = batchHandlers.size();
-            batchHandlers.clear();
+            int segmentCount = workersMap.size();
+            workersMap.clear();
             totalSegmentsReleased.addAndGet(segmentCount);
 
             // Close the shared arena
