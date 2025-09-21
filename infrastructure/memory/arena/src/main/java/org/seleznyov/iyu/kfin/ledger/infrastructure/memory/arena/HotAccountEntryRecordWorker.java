@@ -1,4 +1,4 @@
-package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.processor;
+package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena;
 
 import lombok.extern.slf4j.Slf4j;
 import org.seleznyov.iyu.kfin.ledger.domain.model.entryrecord.EntryRecord;
@@ -8,6 +8,8 @@ import org.seleznyov.iyu.kfin.ledger.domain.model.snapshot.EntriesSnapshotReason
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.configuration.LedgerConfiguration;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.*;
 
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -19,7 +21,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * HotAccountContext writes entry-record into batch and spreads to ring buffers when batch is full or idle for too long.
  */
 @Slf4j
-public class EntryRecordBatchShardProcessor {
+public class HotAccountEntryRecordWorker {
 
     // Account configuration
     private static final int MAX_BATCH_ELEMENTS_COUNT = 1000;
@@ -39,7 +41,7 @@ public class EntryRecordBatchShardProcessor {
 
     //    private final Arena accountArena;
     private final EntryRecordBatchHandler entryRecordBatchHandler;
-    private final PostgreSqlEntryRecordBatchRingBufferHandler pgEntryRecordBatchRingBufferHandler;
+    private final HotAccountPostgresWorkersManager postgresWorkersManager;
     private final WalEntryRecordBatchRingBufferHandler walEntryRecordBatchRingBufferHandler;
 //    private final WalEntryRecordBatchRingBufferHandler walEntryRecordBatchRingBufferHandler;
 //    private final MemorySegment amountArraySegment;
@@ -57,7 +59,7 @@ public class EntryRecordBatchShardProcessor {
     private volatile EntriesSnapshot lastSnapshot = null;
     private volatile long lastAccessTime = System.currentTimeMillis();
 
-    private final ExecutorService shardExecutorService;
+    private final ExecutorService executorService;
 
     // === SNAPSHOT MANAGEMENT ===
 
@@ -74,14 +76,17 @@ public class EntryRecordBatchShardProcessor {
     private final AtomicLong totalFlushTime = new AtomicLong(0);
     private final AtomicLong totalSnapshotsCreated = new AtomicLong(0);
     private final AtomicLong totalProcessingErrors = new AtomicLong(0);
+    private final Arena batchArena;
 
     // === CONSTRUCTOR ===
 
-    public EntryRecordBatchShardProcessor(
+    public HotAccountEntryRecordWorker(
+        int workerId,
+        long walSequenceId,
         LedgerConfiguration ledgerConfiguration,
-        EntryRecordBatchHandler entryRecordBatchHandler,
-        ExecutorService shardDedicatedExecutorService,
-        PostgreSqlEntryRecordBatchRingBufferHandler postgresqlEntryRecordBatchRingBufferHandler,
+//        EntryRecordBatchHandler entryRecordBatchHandler,
+//        ExecutorService shardDedicatedExecutorService,
+        HotAccountPostgresWorkersManager postgresWorkersManager,
         EntriesSnapshotSharedBatchHandler snapshotSharedBatchHandler,
         PostgreSqlEntriesSnapshotBatchRingBufferHandler snapshotBatchRingBufferHandler,
         WalEntryRecordBatchRingBufferHandler walEntryRecordBatchRingBufferHandler
@@ -92,7 +97,38 @@ public class EntryRecordBatchShardProcessor {
 
 //        final long entriesSnapshotMemorySize = (long) MAX_BATCH_ELEMENTS_COUNT * EntriesSnapshotSharedBatchHandler.POSTGRES_ENTRIES_SNAPSHOT_SIZE;
 //        final MemorySegment snapshotsSegment = accountArena.allocate(entriesSnapshotMemorySize, 64);
-        this.shardExecutorService = shardDedicatedExecutorService;
+
+        final int currentWorkerIndex = workerId; // Для lambda
+
+        final BlockingQueue<Runnable> boundedQueue = new ArrayBlockingQueue<>(ledgerConfiguration.entries().workerBoundedQueueSize());
+
+        final ThreadFactory threadFactory = runnable -> {
+            Thread thread = Thread.ofPlatform()
+                .name("account-stripe-" + currentWorkerIndex)
+                .priority(Thread.NORM_PRIORITY + 1) // Повышенный приоритет
+                .unstarted(runnable);
+
+            // Настройки для финансового приложения
+            thread.setUncaughtExceptionHandler(
+                exceptionHandler.createHandler(currentWorkerIndex)
+            );
+
+            return thread;
+        };
+
+        StripeQueueRejectionHandler rejectionHandler =
+            new StripeQueueRejectionHandler(currentWorkerIndex, alertingService, stripeMetrics);
+
+        // ThreadPoolExecutor с bounded queue
+        this.executorService = new ThreadPoolExecutor(
+            1, 1,                          // Ровно один поток
+            0L, TimeUnit.MILLISECONDS,     // Без keep-alive
+            boundedQueue,                  // Bounded queue на 1000 элементов
+            threadFactory,                 // Ваша ThreadFactory
+            rejectionHandler              // Custom rejection handler
+        );
+
+
         this.snapshotSharedBatchHandler = snapshotSharedBatchHandler;
         this.snapshotBatchRingBufferHandler = snapshotBatchRingBufferHandler;
         this.walEntryRecordBatchRingBufferHandler = walEntryRecordBatchRingBufferHandler;
@@ -110,8 +146,16 @@ public class EntryRecordBatchShardProcessor {
 //        final MemorySegment entriesSegment = accountArena.allocate(entryMemorySize, 64);
 
         // Create PostgreSQL binary layout
-        this.entryRecordBatchHandler = entryRecordBatchHandler;
-        this.pgEntryRecordBatchRingBufferHandler = postgresqlEntryRecordBatchRingBufferHandler;
+        final Arena batchArena = Arena.ofShared();
+        this.batchArena = batchArena;
+        final MemorySegment memorySegment = batchArena.allocate((long) ledgerConfiguration.entries().batchEntriesCount() * EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE, 64);
+        this.entryRecordBatchHandler = new EntryRecordBatchHandler(
+            memorySegment,
+            walSequenceId,
+            ledgerConfiguration
+        );
+            //entryRecordBatchHandler;
+        this.postgresWorkersManager = postgresWorkersManager;
 //            new EntryRecordBatchHandler(
 //            entriesSegment,
 //            configuration.accountId(),
@@ -193,7 +237,7 @@ public class EntryRecordBatchShardProcessor {
                 throw new RuntimeException("Entry processing failed", exception);
             }
 
-        }, shardExecutorService);
+        }, executorService);
     }
 
     public CompletableFuture<Long> currentBalance(UUID accountId) {
@@ -221,7 +265,7 @@ public class EntryRecordBatchShardProcessor {
                 return snapshotBalance;
             }
 
-        }, shardExecutorService);
+        }, executorService);
     }
 
 //    public CompletableFuture<Void> flushBatch() {
@@ -241,7 +285,7 @@ public class EntryRecordBatchShardProcessor {
 //    }
 
     public CompletableFuture<Void> asyncSnapshot(LocalDate operationDay, UUID accountId) {
-        return CompletableFuture.runAsync(() -> snapshot(operationDay, accountId), shardExecutorService);
+        return CompletableFuture.runAsync(() -> snapshot(operationDay, accountId), executorService);
     }
 
     private void snapshot(LocalDate operationDay, UUID accountId) {
@@ -297,7 +341,7 @@ public class EntryRecordBatchShardProcessor {
 //            long totalDelta = calculateCurrentBatchDelta();
             final long entriesOffset = entryRecordBatchHandler.offset();
             final long arenaHalfSize = entryRecordBatchHandler.arenaSize() >> 1;
-            final boolean pgBarrierPassed = pgEntryRecordBatchRingBufferHandler.stampBatchForwardPassBarrier(
+            final boolean pgBarrierPassed = postgresWorkersManager.nextRingBufferHandler().stampBatchForwardPassBarrier(
 //                accountId,
                 entryRecordBatchHandler,
                 entriesOffset < arenaHalfSize
@@ -567,7 +611,7 @@ public class EntryRecordBatchShardProcessor {
                     : arenaHalfSize - (ledgerConfiguration.entries().entryRecordsCountToSnapshot() - tailSnapshotSize);
 
             }
-            final boolean pgBarrierPassed = pgEntryRecordBatchRingBufferHandler.stampBatchForwardPassBarrier(
+            final boolean pgBarrierPassed = postgresWorkersManager.stampBatchForwardPassBarrier(
 //                accountId,
                 entryRecordBatchHandler,
                 entriesOffset < arenaHalfSize
@@ -589,7 +633,7 @@ public class EntryRecordBatchShardProcessor {
                 lastSnapshot
             );
 
-        }, shardExecutorService);
+        }, executorService);
 
         try {
             finalFlush.get(5, TimeUnit.SECONDS);
@@ -597,14 +641,14 @@ public class EntryRecordBatchShardProcessor {
 //            log.error("Error during final flush for account {}", accountId, e);
         }
 
-        shardExecutorService.shutdown();
+        executorService.shutdown();
 
         try {
-            if (!shardExecutorService.awaitTermination(10, TimeUnit.SECONDS)) {
-                shardExecutorService.shutdownNow();
+            if (!executorService.awaitTermination(10, TimeUnit.SECONDS)) {
+                executorService.shutdownNow();
             }
         } catch (InterruptedException e) {
-            shardExecutorService.shutdownNow();
+            executorService.shutdownNow();
             Thread.currentThread().interrupt();
         }
 

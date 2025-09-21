@@ -43,11 +43,11 @@ public abstract class DirectPostgresBatchSender<T extends BatchRingBufferHandler
 
     protected abstract String copySql();
 
-    protected final AtomicLong totalBytesSent = new AtomicLong(0);
-    protected final AtomicLong totalEntriesSent = new AtomicLong(0);
-    protected final AtomicLong totalBatchesSent = new AtomicLong(0);
-    protected final AtomicLong totalSendTime = new AtomicLong(0);
-    protected final AtomicLong totalErrors = new AtomicLong(0);
+//    protected final AtomicLong totalBytesSent = new AtomicLong(0);
+//    protected final AtomicLong totalEntriesSent = new AtomicLong(0);
+//    protected final AtomicLong totalBatchesSent = new AtomicLong(0);
+//    protected final AtomicLong totalSendTime = new AtomicLong(0);
+//    protected final AtomicLong totalErrors = new AtomicLong(0);
     protected final long[] sentResults = new long[RESULTS_ARRAY_LENGTH];
     protected final T ringBufferHandler;
 

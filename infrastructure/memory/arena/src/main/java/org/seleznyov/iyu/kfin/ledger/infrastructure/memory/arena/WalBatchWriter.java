@@ -20,7 +20,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.concurrent.atomic.AtomicLong;
 
 @Slf4j
-public class WalBatchWriter implements BatchProcessor {
+public class WalBatchWriter {
 
     private final static int CPU_CACHE_LINE_SIZE = 64;
 
@@ -139,8 +139,6 @@ public class WalBatchWriter implements BatchProcessor {
         }
     }
 
-
-    @Override
     public long processBatch(BatchRingBufferHandler ringBufferHandler, long batchSlotOffset, long batchRawSize) {
         try {
 
