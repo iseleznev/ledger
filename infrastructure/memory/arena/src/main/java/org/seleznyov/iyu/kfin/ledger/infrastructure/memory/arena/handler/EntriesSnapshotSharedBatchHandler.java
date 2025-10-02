@@ -7,15 +7,34 @@ import org.seleznyov.iyu.kfin.ledger.domain.model.snapshot.EntriesSnapshot;
 
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
-import java.util.UUID;
-import java.util.concurrent.atomic.AtomicLong;
 
 @Slf4j
 @Data
 @Accessors(fluent = true)
 public class EntriesSnapshotSharedBatchHandler {
+
+    private static final VarHandle STAMP_STATUS_MEMORY_BARRIER;
+//    private static final VarHandle READ_OFFSET_MEMORY_BARRIER;
+    private static final VarHandle STAMP_OFFSET_MEMORY_BARRIER;
+
+    static {
+        try {
+            MethodHandles.Lookup lookup = MethodHandles.lookup();
+            // Для статических полей
+            STAMP_STATUS_MEMORY_BARRIER = lookup.findVarHandle(
+                PostgreSqlEntryRecordRingBufferHandler.class, "stampStatus", int.class);
+//            READ_OFFSET_MEMORY_BARRIER = lookup.findVarHandle(
+//                PostgreSqlEntryRecordBatchRingBufferHandler.class, "readOffset", long.class);
+            STAMP_OFFSET_MEMORY_BARRIER = lookup.findVarHandle(
+                PostgreSqlEntryRecordRingBufferHandler.class, "stampOffset", long.class);
+        } catch (Exception e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
 
     private static final long BASE_EPOCH_MILLIS = LocalDateTime.of(2000, 1, 1, 0, 0, 0, 0).toInstant(ZoneOffset.UTC).toEpochMilli();
 
@@ -88,14 +107,17 @@ public class EntriesSnapshotSharedBatchHandler {
     private static final int ORDINAL_OFFSET = (int) (ORDINAL_LENGTH_OFFSET + LENGTH_TYPE.byteSize());
     private static final ValueLayout ORDINAL_TYPE = ValueLayout.JAVA_LONG;
 
-    private static final int POSTGRES_ENTRIES_SNAPSHOT_RAW_SIZE = (int) (ORDINAL_OFFSET + ORDINAL_TYPE.byteSize());
+    private static final int WAL_SEQUENCE_ID_LENGTH_OFFSET = (int) (ORDINAL_OFFSET + ORDINAL_TYPE.byteSize());
+    public static final int WAL_SEQUENCE_ID_OFFSET = (int) (WAL_SEQUENCE_ID_LENGTH_OFFSET + LENGTH_TYPE.byteSize());
+    private static final ValueLayout WAL_SEQUENCE_ID_TYPE = ValueLayout.JAVA_LONG;
+
+    private static final int POSTGRES_ENTRIES_SNAPSHOT_RAW_SIZE = (int) (WAL_SEQUENCE_ID_OFFSET + WAL_SEQUENCE_ID_TYPE.byteSize());
 
     public static final int POSTGRES_ENTRIES_SNAPSHOT_SIZE = (POSTGRES_ENTRIES_SNAPSHOT_RAW_SIZE + CPU_CACHE_LINE_SIZE - 1) & -CPU_CACHE_LINE_SIZE;
 
     private final MemorySegment memorySegment;
-    private final UUID entriesAccountId;
 
-    private final AtomicLong sharedOffset = new AtomicLong(0);
+    private long stampOffset = 0;
     private final long arenaSize;
 
     // Эти поля не требуют atomic операций, так как они используются
@@ -109,11 +131,9 @@ public class EntriesSnapshotSharedBatchHandler {
 
     public EntriesSnapshotSharedBatchHandler(
         MemorySegment memorySegment,
-        UUID accountId,
         long totalAmount,
         long lastAccessTime
     ) {
-        this.entriesAccountId = accountId;
         this.memorySegment = memorySegment;
         this.totalAmount = totalAmount;
         this.arenaSize = memorySegment.byteSize();
@@ -157,7 +177,7 @@ public class EntriesSnapshotSharedBatchHandler {
      */
     public long stampSnapshotForwardPassBarrier(EntriesSnapshot snapshot) {
         // Атомарно резервируем место и получаем текущий offset для записи
-        final long beforeForwardOffset = sharedOffset.getAndAccumulate(
+        final long beforeForwardOffset = stampOffset.getAndAccumulate(
             POSTGRES_ENTRIES_SNAPSHOT_SIZE,
             (currentOffset, increment) -> {
                 long newOffset = currentOffset + increment;
@@ -232,14 +252,14 @@ public class EntriesSnapshotSharedBatchHandler {
      * ОПТИМИЗАЦИЯ 5: Методы для получения текущего состояния без лишних atomic операций
      */
     public long getCurrentOffset() {
-        return sharedOffset.get();
+        return stampOffset.get();
     }
 
     /**
      * ОПТИМИЗАЦИЯ 6: Упрощенные методы без множественных get() вызовов
      */
     public void offsetForward() {
-        sharedOffset.accumulateAndGet(
+        stampOffset.accumulateAndGet(
             POSTGRES_ENTRIES_SNAPSHOT_SIZE,
             (offset, offsetShift) ->
                 offset + offsetShift < arenaSize
@@ -249,12 +269,12 @@ public class EntriesSnapshotSharedBatchHandler {
     }
 
     public boolean offsetBarrierPassed() {
-        final long offset = sharedOffset.get();
+        final long offset = stampOffset.get();
         return offset == 0 || (offset + POSTGRES_ENTRIES_SNAPSHOT_SIZE) == (arenaSize >> 1);
     }
 
     public int barrierPassedSnapshotsCount() {
-        final long offset = sharedOffset.get();
+        final long offset = stampOffset.get();
         final long arenaHalfSize = arenaSize >> 1;
         if (offset == arenaHalfSize) {
             return (int) (arenaSize - arenaHalfSize) / POSTGRES_ENTRIES_SNAPSHOT_SIZE;

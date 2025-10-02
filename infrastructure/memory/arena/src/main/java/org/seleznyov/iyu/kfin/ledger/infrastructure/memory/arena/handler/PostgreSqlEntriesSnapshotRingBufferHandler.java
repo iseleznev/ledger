@@ -3,20 +3,40 @@ package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler;
 import lombok.Data;
 import lombok.experimental.Accessors;
 import lombok.extern.slf4j.Slf4j;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.processor.batchprocessor.BatchProcessor;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.prevprocessor.RingBufferProcessor;
 
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
-import java.util.UUID;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.LockSupport;
 
 @Slf4j
 @Data
 @Accessors(fluent = true)
-public class PostgreSqlEntriesSnapshotBatchRingBufferHandler implements BatchRingBufferHandler {
+public class PostgreSqlEntriesSnapshotRingBufferHandler implements RingBufferHandler {
 
-    private static final VarHandle STAMP_MEMORY_BARRIER_STATUS = ValueLayout.JAVA_INT.varHandle();
+    private static final VarHandle STAMP_STATUS_MEMORY_BARRIER;
+    private static final VarHandle WAL_SEQUENCE_ID_MEMORY_BARRIER;
+    private static final VarHandle READ_OFFSET_MEMORY_BARRIER;
+    private static final VarHandle STAMP_OFFSET_MEMORY_BARRIER;
+
+    static {
+        try {
+            MethodHandles.Lookup lookup = MethodHandles.lookup();
+            // Для статических полей
+            STAMP_STATUS_MEMORY_BARRIER = lookup.findVarHandle(
+                PostgreSqlEntriesSnapshotRingBufferHandler.class, "stampStatus", int.class);
+            WAL_SEQUENCE_ID_MEMORY_BARRIER = lookup.findVarHandle(
+                PostgreSqlEntryRecordRingBufferHandler.class, "walSequenceId", long.class);
+            READ_OFFSET_MEMORY_BARRIER = lookup.findVarHandle(
+                PostgreSqlEntriesSnapshotRingBufferHandler.class, "readOffset", long.class);
+            STAMP_OFFSET_MEMORY_BARRIER = lookup.findVarHandle(
+                PostgreSqlEntriesSnapshotRingBufferHandler.class, "stampOffset", long.class);
+        } catch (Exception e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
 
     private final static int CPU_CACHE_LINE_SIZE = 64;
 
@@ -67,14 +87,20 @@ public class PostgreSqlEntriesSnapshotBatchRingBufferHandler implements BatchRin
 
     private long offset;
     private long arenaSize;
+    private long arenaHalfSize;
+
+    private long walSequenceId;
+    private int stampStatus;
+    private long readOffset = 0;
+    private long stampOffset = 0;
 
 //    private final AtomicLong writeIndex = new AtomicLong(0);
 //    private final AtomicLong readIndex = new AtomicLong(0);
 
-    private final AtomicLong stampOffset = new AtomicLong(0);
-    private final AtomicLong readOffset = new AtomicLong(0);
+//    private final AtomicLong stampOffset = new AtomicLong(0);
+//    private final AtomicLong readOffset = new AtomicLong(0);
 
-    public PostgreSqlEntriesSnapshotBatchRingBufferHandler(MemorySegment memorySegment, long maxSnapshotsPerBatch) {
+    public PostgreSqlEntriesSnapshotRingBufferHandler(MemorySegment memorySegment, long maxSnapshotsPerBatch) {
         this.ringBufferSegment = memorySegment;
 //        this.maxBatches = maxBatches;
         this.arenaSize = memorySegment.byteSize();
@@ -85,6 +111,7 @@ public class PostgreSqlEntriesSnapshotBatchRingBufferHandler implements BatchRin
         this.offset = 0;
         this.maxBatches = this.arenaSize / this.maxBatchSlotSize;
 
+        this.arenaHalfSize = this.arenaSize >> 1;
 
         ringBufferSegment.asSlice(0, METADATA_SIZE).fill((byte) 0);
         ringBufferSegment.set(ValueLayout.JAVA_LONG, WRITE_INDEX_OFFSET, 0L);
@@ -92,8 +119,20 @@ public class PostgreSqlEntriesSnapshotBatchRingBufferHandler implements BatchRin
         ringBufferSegment.set(ValueLayout.JAVA_LONG, TOTAL_BATCHES_OFFSET, 0L);
     }
 
+    public long walSequenceId(long batchOffset) {
+        final int status = (int) STAMP_STATUS_MEMORY_BARRIER.getAcquire(ringBufferSegment, batchOffset);
+        if (status != MemoryBarrierOperationStatus.COMPLETED.ordinal()) {
+            throw new IllegalStateException("Batch not ready: " + status);
+        }
+        return ringBufferSegment.get(ValueLayout.JAVA_LONG, batchOffset + BATCH_BODY_OFFSET + EntriesSnapshotSharedBatchHandler.WAL_SEQUENCE_ID_OFFSET);
+//        return (long) STAMP_MEMORY_BARRIER_WAL_SEQUENCE_ID.getAcquire(
+//            ringBufferSegment,
+//            batchOffset + BATCH_BODY_OFFSET + EntryRecordBatchHandler.WAL_SEQUENCE_ID_OFFSET
+//        );
+    }
+
     @Override
-    public MemorySegment ringBufferSegment() {
+    public MemorySegment memorySegment() {
         return ringBufferSegment;
     }
 
@@ -144,96 +183,152 @@ public class PostgreSqlEntriesSnapshotBatchRingBufferHandler implements BatchRin
         return ringBufferSegment.get(ValueLayout.JAVA_INT, offset + BATCH_TOTAL_AMOUNT_OFFSET);
     }
 
-    public boolean tryProcessBatch(BatchProcessor batchProcessor) {
-        long currentReadOffset = readOffset.get();
-        long currentStampOffset = stampOffset.get();
+    public long tryProcessBatch(RingBufferProcessor ringBufferProcessor) {
+        final int status = (int) STAMP_STATUS_MEMORY_BARRIER.getAcquire(this);
+        if (status != MemoryBarrierOperationStatus.COMPLETED.ordinal()) {
+            throw new IllegalStateException("Batch is in progress now and do not ready: " + MemoryBarrierOperationStatus.fromMemoryOrdinal(status).name());
+        }
+
+        long currentStampOffset = (long) STAMP_OFFSET_MEMORY_BARRIER.get(this);
+        long currentReadOffset = (long) READ_OFFSET_MEMORY_BARRIER.get(this);
+
+        VarHandle.acquireFence();
 
         // Проверяем есть ли данные
         if (currentReadOffset >= currentStampOffset) {
-            return false;
+            throw new IllegalStateException("No data to process");
         }
 
-        // Пытаемся занять слот для чтения
-        currentReadOffset = readOffset.incrementAndGet();
+        final long slotCount = ringBufferSegment.get(ValueLayout.JAVA_INT, currentReadOffset + BATCH_SNAPSHOTS_COUNT_OFFSET);
+        final long slotSize = BATCH_HEADER_SIZE
+            + (slotCount * EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE)
+            + 2;
+
+        final long batchSize = Math.min(
+            this.maxBatchSlotSize,
+            currentReadOffset > this.arenaHalfSize
+                ? this.arenaSize - this.arenaHalfSize
+                : this.arenaHalfSize
+        );
+        final long slotOffsetBarrier = currentReadOffset > this.arenaHalfSize
+            ? this.arenaSize
+            : this.arenaHalfSize;
+//        currentReadOffset = (long) READ_OFFSET_MEMORY_BARRIER.getAndAdd(this, batchSize);
+
+        long lastSlotSequenceId = ringBufferSegment.get(ValueLayout.JAVA_LONG, currentReadOffset + EntryRecordBatchHandler.WAL_SEQUENCE_ID_OFFSET);
+        long slotOffset = currentReadOffset + slotSize;
+        while (slotOffset < batchSize + currentReadOffset && slotOffset < slotOffsetBarrier) {
+            final long nextSlotCount = ringBufferSegment.get(ValueLayout.JAVA_INT, slotOffset + BATCH_SNAPSHOTS_COUNT_OFFSET);
+            final long nextSlotSize = BATCH_HEADER_SIZE
+                + (nextSlotCount * EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE)
+                + 2;
+            lastSlotSequenceId = ringBufferSegment.get(ValueLayout.JAVA_LONG, currentReadOffset + EntryRecordBatchHandler.WAL_SEQUENCE_ID_OFFSET);
+            slotOffset += nextSlotSize;
+        }
+        long nextReadOffset = slotOffset;
 
         try {
-            long batchSlotOffset = currentReadOffset;
-
             // ✅ Обрабатываем batch
-            final boolean processed = batchProcessor.processBatch(this, batchSlotOffset, batchSize(batchSlotOffset));
+            final long processed = ringBufferProcessor.process(this, currentReadOffset, batchSize);
 
-            if (processed) {
+            if (processed == batchSize) {
                 // ✅ Очищаем slot для переиспользования
                 // clearBatchSlot(batchSlotOffset);
                 log.debug("Successfully processed and cleared batch at slot {}", currentReadOffset);
+                READ_OFFSET_MEMORY_BARRIER.setRelease(this, nextReadOffset);
             } else {
                 // Откатываем read index если обработка не удалась
-                readOffset.compareAndSet(currentReadOffset + 1, currentReadOffset);
+//                readOffset.compareAndSet(currentReadOffset + 1, currentReadOffset);
+                VarHandle.releaseFence();
                 log.warn("Failed to process batch at slot {}, rolling back", currentReadOffset);
+                throw new IllegalStateException("Failed to process batch");
             }
 
-            return processed;
+            return lastSlotSequenceId;
 
         } catch (Exception e) {
             // Откатываем read index при ошибке
-            readOffset.compareAndSet(currentReadOffset + 1, currentReadOffset);
+            VarHandle.releaseFence();
             log.error("Error consuming batch at slot {}", currentReadOffset, e);
             throw new RuntimeException("Failed to consume batch", e);
         }
     }
 
     private long tryStampBatch(
-        UUID accountId,
         EntriesSnapshotSharedBatchHandler snapshotSharedBatchHandler,
         long entriesOffset,
         int snapshotsCount,
         long totalAmount
     ) {
-        long currentStampOffset = stampOffset.get();
-        long currentReadOffset = readOffset.get();
+        long copySize = (long) snapshotsCount * EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE;
+        int maxAttempts = 100;
+        int spinAttempts = 20;
+        int yieldAttempts = 50;
+        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+            long currentReadOffset = (long) READ_OFFSET_MEMORY_BARRIER.getAcquire(this);
+            long currentStampOffset = (long) STAMP_OFFSET_MEMORY_BARRIER.getAndAdd(this, copySize);
 
-        try {
-            currentStampOffset = stampOffset.incrementAndGet();
+//        long pendingBatches = currentReadOffset - currentStampOffset;// - currentReadOffset;
+
+            if (currentStampOffset > currentReadOffset - copySize) {
+                if (attempt < spinAttempts) {
+                    Thread.onSpinWait();
+                } else if (attempt < spinAttempts + yieldAttempts) {
+                    Thread.yield();
+                } else {
+                    long parkNanos = 1_000L << Math.min(attempt - spinAttempts - yieldAttempts - yieldAttempts, 16);
+                    LockSupport.parkNanos(parkNanos);
+                }
+                continue;
+            }
+
+            try {
+                STAMP_STATUS_MEMORY_BARRIER.set(this, MemoryBarrierOperationStatus.HANDLING.memoryOrdinal());
 
 //        if (!writeIndex.compareAndSet(currentWriteIndex, currentWriteIndex + 1)) {
 //            log.trace("Failed to acquire write slot, another thread got it");
 //            return false;
 //        }
 
-            //long slotOffset = slotOffset(currentStampOffset);
+                //long slotOffset = slotOffset(currentStampOffset);
 
-            STAMP_MEMORY_BARRIER_STATUS.setRelease(ringBufferSegment, currentStampOffset, MemoryBarrierOperationStatus.HANDLING);
-            writePostgresBatchHeader(currentStampOffset, accountId, snapshotsCount, totalAmount);
-            copyPostgresBinaryRecords(currentStampOffset, entriesOffset, snapshotSharedBatchHandler, snapshotsCount);
-            writePostgresTerminator(currentStampOffset, snapshotsCount);
+                VarHandle.storeStoreFence();
 
-            final long checksum = calculateBatchChecksum(currentStampOffset, snapshotsCount);
+                writePostgresBatchHeader(currentStampOffset, snapshotsCount, totalAmount);
+                copyPostgresBinaryRecords(currentStampOffset, entriesOffset, snapshotSharedBatchHandler, snapshotsCount);
+                writePostgresTerminator(currentStampOffset, snapshotsCount);
 
-            ringBufferSegment.set(
-                ValueLayout.JAVA_LONG,
-                currentStampOffset + BATCH_CHECKSUM_OFFSET,
-                checksum
-            );
+                final long checksum = calculateBatchChecksum(currentStampOffset, snapshotsCount);
 
-            // ✅ Обновляем глобальный счетчик
-            long totalBatches = ringBufferSegment.get(ValueLayout.JAVA_LONG, TOTAL_BATCHES_OFFSET);
-            ringBufferSegment.set(ValueLayout.JAVA_LONG, TOTAL_BATCHES_OFFSET, totalBatches + 1);
+                ringBufferSegment.set(
+                    ValueLayout.JAVA_LONG,
+                    currentStampOffset + BATCH_CHECKSUM_OFFSET,
+                    checksum
+                );
 
-            VarHandle.releaseFence();
+                // ✅ Обновляем глобальный счетчик
+                long totalBatches = ringBufferSegment.get(ValueLayout.JAVA_LONG, TOTAL_BATCHES_OFFSET);
+                ringBufferSegment.set(ValueLayout.JAVA_LONG, TOTAL_BATCHES_OFFSET, totalBatches + 1);
 
-            STAMP_MEMORY_BARRIER_STATUS.setRelease(ringBufferSegment, currentStampOffset, MemoryBarrierOperationStatus.COMPLETED);
+                VarHandle.releaseFence();
 
-            log.debug("Successfully published batch for account {}: {} snapshots", accountId, snapshotsCount);
-            return snapshotsCountBatchSize(snapshotsCount);
-        } catch (Exception exception) {
-            // Откатываем write index при ошибке
-            stampOffset.compareAndSet(currentStampOffset + 1, currentStampOffset);
-            log.error("Error publishing batch for account {}", accountId, exception);
-            throw new RuntimeException("Failed to publish batch", exception);
+                STAMP_STATUS_MEMORY_BARRIER.setRelease(this, MemoryBarrierOperationStatus.COMPLETED.memoryOrdinal());
+
+//                log.debug("Successfully published batch for account {}: {} snapshots", accountId, snapshotsCount);
+                return snapshotsCountBatchSize(snapshotsCount);
+            } catch (Exception exception) {
+                // Откатываем write index при ошибке
+                VarHandle.releaseFence();
+                STAMP_STATUS_MEMORY_BARRIER.setRelease(this, MemoryBarrierOperationStatus.ERROR.memoryOrdinal());
+//            stampOffset.compareAndSet(currentStampOffset + 1, currentStampOffset);
+//            log.error("Error publishing batch for account {}", accountId, exception);
+                throw new RuntimeException("Failed to publish batch", exception);
+            }
         }
+        throw new IllegalStateException("Failed to publish batch after " + maxAttempts + " attempts");
     }
 
-    private void writePostgresBatchHeader(long batchSlotOffset, UUID accountId, int entryCount, long totalAmount) {
+    private void writePostgresBatchHeader(long batchSlotOffset, int entryCount, long totalAmount) {
         // PostgreSQL signature
         MemorySegment.copy(
             MemorySegment.ofArray(postgresSignature), 0,
@@ -249,16 +344,16 @@ public class PostgreSqlEntriesSnapshotBatchRingBufferHandler implements BatchRin
         ringBufferSegment.set(ValueLayout.JAVA_INT, batchSlotOffset + POSTGRES_EXTENSION_OFFSET, 0);
 
         // Наши metadata
-        ringBufferSegment.set(
-            ValueLayout.JAVA_LONG,
-            batchSlotOffset + BATCH_ACCOUNT_ID_MOST_SIGNIFICANT_OFFSET,
-            accountId.getMostSignificantBits()
-        );
-        ringBufferSegment.set(
-            ValueLayout.JAVA_LONG,
-            batchSlotOffset + BATCH_ACCOUNT_ID_LEAST_SIGNIFICANT_OFFSET,
-            accountId.getLeastSignificantBits()
-        );
+//        ringBufferSegment.set(
+//            ValueLayout.JAVA_LONG,
+//            batchSlotOffset + BATCH_ACCOUNT_ID_MOST_SIGNIFICANT_OFFSET,
+//            accountId.getMostSignificantBits()
+//        );
+//        ringBufferSegment.set(
+//            ValueLayout.JAVA_LONG,
+//            batchSlotOffset + BATCH_ACCOUNT_ID_LEAST_SIGNIFICANT_OFFSET,
+//            accountId.getLeastSignificantBits()
+//        );
         ringBufferSegment.set(ValueLayout.JAVA_INT, batchSlotOffset + BATCH_SNAPSHOTS_COUNT_OFFSET, entryCount);
         ringBufferSegment.set(ValueLayout.JAVA_LONG, batchSlotOffset + BATCH_TOTAL_AMOUNT_OFFSET, totalAmount);
         ringBufferSegment.set(
@@ -328,13 +423,13 @@ public class PostgreSqlEntriesSnapshotBatchRingBufferHandler implements BatchRin
     }
 
     public boolean stampBatchForwardPassBarrier(
-        UUID accountId,
+//        UUID accountId,
         EntriesSnapshotSharedBatchHandler snapshotBatchHandler,
         long snapshotsOffset,
         int snapshotsCount,
         long totalAmount
     ) {
-        final long entriesBatchSize = tryStampBatch(accountId, snapshotBatchHandler, snapshotsOffset, snapshotsCount, totalAmount);
+        final long entriesBatchSize = tryStampBatch(snapshotBatchHandler, snapshotsOffset, snapshotsCount, totalAmount);
         offsetForward(entriesBatchSize);
         return offsetBarrierPassed(entriesBatchSize);
 
@@ -364,65 +459,65 @@ public class PostgreSqlEntriesSnapshotBatchRingBufferHandler implements BatchRin
         offset = 0;
     }
 
-    public String getDiagnostics() {
-        return String.format(
-            "PostgresBinaryBatchLayout[capacity=%d, size=%d, utilization=%.1f%%, " +
-                "write_index=%d, read_index=%d, total_batches=%d]",
-            maxBatches, size(), getUtilization(),
-            stampOffset.get(), readOffset.get(),
-            ringBufferSegment.get(ValueLayout.JAVA_LONG, TOTAL_BATCHES_OFFSET)
-        );
-    }
-
-    public long size() {
-        return Math.max(0, stampOffset.get() - readOffset.get());
-    }
-
-    public boolean isEmpty() {
-        return readOffset.get() >= stampOffset.get();
-    }
-
-    public boolean isFull() {
-        return stampOffset.get() - readOffset.get() >= maxBatches;
-    }
-
-    public double getUtilization() {
-        return (double) size() / maxBatches * 100.0;
-    }
-
-    public boolean isHealthy() {
-        long write = stampOffset.get();
-        long read = readOffset.get();
-
-        if (read > write) {
-            log.error("Ring buffer inconsistency: read_index={} > write_index={}", read, write);
-            return false;
-        }
-
-        if (write - read > maxBatches) {
-            log.error("Ring buffer overflow: write_index={}, read_index={}, capacity={}",
-                write, read, maxBatches);
-            return false;
-        }
-
-        return true;
-    }
-
-    private long calculateChecksum(EntriesSnapshotSharedBatchHandler snapshotSharedBatchHandler, long snapshotsCount) {
-        long checksum = 0;
-        long length = snapshotsCount * this.maxBatchSlotSize;
-
-        // ✅ XOR checksum по 8-байтовым блокам
-        for (int i = 0; i <= length - BATCH_CHECKSUM_SIZE; i += 8) {
-            long value = snapshotSharedBatchHandler.memorySegment().get(ValueLayout.JAVA_LONG, offset + i);
-            checksum ^= value;
-        }
-
-        // ✅ Обрабатываем остаток
-        for (long i = length - (length % BATCH_CHECKSUM_SIZE); i < length; i++) {
-            checksum ^= snapshotSharedBatchHandler.memorySegment().get(ValueLayout.JAVA_LONG, offset + i);
-        }
-
-        return checksum;
-    }
+//    public String getDiagnostics() {
+//        return String.format(
+//            "PostgresBinaryBatchLayout[capacity=%d, size=%d, utilization=%.1f%%, " +
+//                "write_index=%d, read_index=%d, total_batches=%d]",
+//            maxBatches, size(), getUtilization(),
+//            stampOffset.get(), readOffset.get(),
+//            ringBufferSegment.get(ValueLayout.JAVA_LONG, TOTAL_BATCHES_OFFSET)
+//        );
+//    }
+//
+//    public long size() {
+//        return Math.max(0, stampOffset.get() - readOffset.get());
+//    }
+//
+//    public boolean isEmpty() {
+//        return readOffset.get() >= stampOffset.get();
+//    }
+//
+//    public boolean isFull() {
+//        return stampOffset.get() - readOffset.get() >= maxBatches;
+//    }
+//
+//    public double getUtilization() {
+//        return (double) size() / maxBatches * 100.0;
+//    }
+//
+//    public boolean isHealthy() {
+//        long write = stampOffset.get();
+//        long read = readOffset.get();
+//
+//        if (read > write) {
+//            log.error("Ring buffer inconsistency: read_index={} > write_index={}", read, write);
+//            return false;
+//        }
+//
+//        if (write - read > maxBatches) {
+//            log.error("Ring buffer overflow: write_index={}, read_index={}, capacity={}",
+//                write, read, maxBatches);
+//            return false;
+//        }
+//
+//        return true;
+//    }
+//
+//    private long calculateChecksum(EntriesSnapshotSharedBatchHandler snapshotSharedBatchHandler, long snapshotsCount) {
+//        long checksum = 0;
+//        long length = snapshotsCount * this.maxBatchSlotSize;
+//
+//        // ✅ XOR checksum по 8-байтовым блокам
+//        for (int i = 0; i <= length - BATCH_CHECKSUM_SIZE; i += 8) {
+//            long value = snapshotSharedBatchHandler.memorySegment().get(ValueLayout.JAVA_LONG, offset + i);
+//            checksum ^= value;
+//        }
+//
+//        // ✅ Обрабатываем остаток
+//        for (long i = length - (length % BATCH_CHECKSUM_SIZE); i < length; i++) {
+//            checksum ^= snapshotSharedBatchHandler.memorySegment().get(ValueLayout.JAVA_LONG, offset + i);
+//        }
+//
+//        return checksum;
+//    }
 }

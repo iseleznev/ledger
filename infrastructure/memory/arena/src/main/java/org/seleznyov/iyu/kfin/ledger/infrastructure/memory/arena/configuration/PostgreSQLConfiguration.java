@@ -3,8 +3,8 @@ package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.configuration;
 public record PostgreSQLConfiguration(
     int workerThreadsCount,
     int stageTablesPerWorkerThreadCount,
-    int ringBufferCopyBatchesCountCapacity,
-    int directCopyBatchRecordsCount,
+    int copyThreadsCount,
+    int directCopyRecordsCount,
     long waitingEmptyRingBufferNanos,
     int emptyIterationsYieldRetries,
     String url,

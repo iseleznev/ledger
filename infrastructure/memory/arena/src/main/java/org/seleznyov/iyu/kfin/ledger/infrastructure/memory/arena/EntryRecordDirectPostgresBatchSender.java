@@ -1,7 +1,7 @@
 package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena;
 
 import lombok.extern.slf4j.Slf4j;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.PostgreSqlEntryRecordBatchRingBufferHandler;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.PostgreSqlEntryRecordRingBufferHandler;
 
 import javax.sql.DataSource;
 
@@ -10,7 +10,7 @@ import javax.sql.DataSource;
  * Минимизирует copying и использует прямой доступ к PostgreSQL protocol
  */
 @Slf4j
-public class EntryRecordDirectPostgresBatchSender extends DirectPostgresBatchSender<PostgreSqlEntryRecordBatchRingBufferHandler> {
+public class EntryRecordDirectPostgresBatchSender extends DirectPostgresBatchSender<PostgreSqlEntryRecordRingBufferHandler> {
 
     private static final String COPY_SQL = """
         (id, account_id, transaction_id, entry_type, amount,
@@ -22,12 +22,8 @@ public class EntryRecordDirectPostgresBatchSender extends DirectPostgresBatchSen
     private final String tableName;
     private final String sql;
 
-    public EntryRecordDirectPostgresBatchSender(
-        DataSource dataSource,
-        String tableName,
-        PostgreSqlEntryRecordBatchRingBufferHandler ringBufferHandler
-    ) {
-        super(dataSource, ringBufferHandler);
+    public EntryRecordDirectPostgresBatchSender(DataSource dataSource, String tableName) {
+        super(dataSource);
         this.tableName = tableName;
         this.sql = "COPY " + this.tableName + " " + COPY_SQL;
     }

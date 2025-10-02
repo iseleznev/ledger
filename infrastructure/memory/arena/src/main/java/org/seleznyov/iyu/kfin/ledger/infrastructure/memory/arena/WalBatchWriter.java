@@ -3,7 +3,7 @@ package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena;
 import com.sun.nio.file.ExtendedOpenOption;
 import lombok.extern.slf4j.Slf4j;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.configuration.WalConfiguration;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.BatchRingBufferHandler;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.RingBufferHandler;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.EntryRecordBatchHandler;
 
 import java.io.IOException;
@@ -138,7 +138,7 @@ public class WalBatchWriter {
     }
 
     public long writeBatch(
-        BatchRingBufferHandler ringBufferHandler,
+        RingBufferHandler ringBufferHandler,
         long walSequenceId,
         long batchSlotOffset,
         long batchRawSize
@@ -153,7 +153,7 @@ public class WalBatchWriter {
             writeBuffer.clear();
 
             if (batchRawSize - HEADER_SIZE <= maxFileSize) {
-                final MemorySegment memorySegment = ringBufferHandler.ringBufferSegment().asSlice(batchSlotOffset, batchRawSize);
+                final MemorySegment memorySegment = ringBufferHandler.memorySegment().asSlice(batchSlotOffset, batchRawSize);
                 writeBuffer.putLong(WAL_MAGIC);
                 writeBuffer.putLong(walSequenceId);
                 writeBuffer.putLong(EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE);
@@ -198,7 +198,7 @@ public class WalBatchWriter {
                         configuration.writeFileBufferSize(),
                         (int) batchRawSize
                     );
-                    final MemorySegment memorySegment = ringBufferHandler.ringBufferSegment().asSlice(offset, chunkSize);
+                    final MemorySegment memorySegment = ringBufferHandler.memorySegment().asSlice(offset, chunkSize);
                     writeBuffer.put(
                         memorySegment.asByteBuffer()
                     );

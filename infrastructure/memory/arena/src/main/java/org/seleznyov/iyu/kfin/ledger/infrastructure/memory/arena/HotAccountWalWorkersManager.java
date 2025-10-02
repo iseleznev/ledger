@@ -1,11 +1,8 @@
 package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena;
 
 import lombok.extern.slf4j.Slf4j;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.configuration.PostgreSQLConfiguration;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.configuration.WalConfiguration;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.PostgreSqlEntryRecordBatchRingBufferHandler;
 
-import javax.sql.DataSource;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.util.concurrent.atomic.AtomicBoolean;

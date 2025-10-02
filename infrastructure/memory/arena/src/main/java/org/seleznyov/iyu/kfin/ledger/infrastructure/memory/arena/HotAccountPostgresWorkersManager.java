@@ -3,7 +3,7 @@ package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena;
 import lombok.extern.slf4j.Slf4j;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.configuration.PostgreSQLConfiguration;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.configuration.WalConfiguration;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.PostgreSqlEntryRecordBatchRingBufferHandler;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.PostgreSqlEntryRecordRingBufferHandler;
 
 import javax.sql.DataSource;
 import java.lang.invoke.MethodHandles;
@@ -103,7 +103,7 @@ public class HotAccountPostgresWorkersManager {
         }
     }
 
-    public PostgreSqlEntryRecordBatchRingBufferHandler nextRingBufferHandler() {
+    public PostgreSqlEntryRecordRingBufferHandler nextRingBufferHandler() {
         final int stripeWorkerId = (int) STRIPE_WORKER_ID.getAndAddAcquire(this, 1);
 
         final int workerId;

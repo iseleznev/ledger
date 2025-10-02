@@ -3,7 +3,7 @@ package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena;
 import lombok.extern.slf4j.Slf4j;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.configuration.WalConfiguration;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.EntryRecordBatchHandler;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.WalEntryRecordBatchRingBufferHandler;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.WalEntryRecordRingBufferHandler;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -13,7 +13,7 @@ import java.util.concurrent.locks.LockSupport;
 public class HotAccountWalWorker {
     static final String STAGE_TABLE_NAME_PREFIX = "stage_record_entry";
 
-    private final WalEntryRecordBatchRingBufferHandler walRingBuffer;
+    private final WalEntryRecordRingBufferHandler walRingBuffer;
     private final WalBatchWriter walBatchWriter;
     private final WalConfiguration walConfiguration;
     private final Arena walArena;
@@ -36,7 +36,7 @@ public class HotAccountWalWorker {
         // ringBufferSizeGB * 1024 * 1024 * 1024; // GB to bytes
         final MemorySegment ringBufferSegment = walArena.allocate(ringBufferSize, 64);
         final long bufferSize = walConfiguration.writeFileBufferSize() % ringBufferSize;
-        this.walRingBuffer = new WalEntryRecordBatchRingBufferHandler(
+        this.walRingBuffer = new WalEntryRecordRingBufferHandler(
             ringBufferSegment,
             walConfiguration.batchEntriesCount(),
             (bufferSize == 0 ? walConfiguration.writeFileBufferSize() : walConfiguration.writeFileBufferSize() / ringBufferSize),
@@ -70,7 +70,7 @@ public class HotAccountWalWorker {
         this.walArena.close();
     }
 
-    public WalEntryRecordBatchRingBufferHandler ringBuffer() {
+    public WalEntryRecordRingBufferHandler ringBuffer() {
         return walRingBuffer;
     }
 

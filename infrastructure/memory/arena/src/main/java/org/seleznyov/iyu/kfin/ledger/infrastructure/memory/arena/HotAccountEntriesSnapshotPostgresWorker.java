@@ -4,28 +4,22 @@ import lombok.extern.slf4j.Slf4j;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.configuration.PostgreSQLConfiguration;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.configuration.WalConfiguration;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.EntryRecordBatchHandler;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.EntryRecordRingBufferHandler;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.PostgreSqlEntryRecordRingBufferHandler;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.prevprocessor.PostgresRingBufferProcessor;
 
 import javax.sql.DataSource;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
-import java.lang.invoke.VarHandle;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.locks.LockSupport;
 
 @Slf4j
-public class HotAccountPostgresWorker implements RingBufferProcessor {
+public class HotAccountEntriesSnapshotPostgresWorker {
 
-    static final String STAGE_TABLE_NAME_PREFIX = "stage_entry_records";
+    static final String STAGE_TABLE_NAME_PREFIX = "stage_entries_snapshots";
 
-    private static final int POSTGRES_SIGNATURE_OFFSET = 0;             // 11 bytes "PGCOPY\n\377\r\n\0"
-    private static final int POSTGRES_FLAGS_OFFSET = 11;                // 4 bytes
-    private static final int POSTGRES_EXTENSION_OFFSET = 15;            // 4 bytes
-    private static final int POSTGRES_HEADER_SIZE = 19;
-
-    //    private final EntryRecordRingBufferHandler postgresRingBuffer;
+    private final PostgreSqlEntryRecordRingBufferHandler postgresRingBuffer;
     private final Map<Integer, PostgresRingBufferProcessor> stageTableProcessorsMap;
     private final PostgresEntryRecordCheckpointWriter checkpointWriter;
     private final PostgreSQLConfiguration postgreSQLConfiguration;
@@ -35,18 +29,13 @@ public class HotAccountPostgresWorker implements RingBufferProcessor {
     private volatile boolean isRunning;
     private int stageTableProcessorIndex = 0;
     private long totalErrors = 0;
-    private final EntryRecordRingBufferHandler ringBufferHandler;
-    private long readOffset = 0;
 
-    public HotAccountPostgresWorker(
-//        EntryRecordRingBufferHandler postgresRingBuffer,
+    public HotAccountEntriesSnapshotPostgresWorker(
         int workerId,
         DataSource dataSource,
         WalConfiguration walConfiguration,
-        PostgreSQLConfiguration postgreSQLConfiguration,
-        EntryRecordRingBufferHandler ringBufferHandler
+        PostgreSQLConfiguration postgreSQLConfiguration
     ) {
-        this.ringBufferHandler  = ringBufferHandler;
         this.postgreSQLConfiguration = postgreSQLConfiguration;
         //this.entryRecordBatchRingBuffer = entryRecordBatchRingBuffer;
         this.postgresArena = Arena.ofShared();
@@ -56,7 +45,10 @@ public class HotAccountPostgresWorker implements RingBufferProcessor {
             * EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE;
             // ringBufferSizeGB * 1024 * 1024 * 1024; // GB to bytes
         MemorySegment ringBufferSegment = postgresArena.allocate(ringBufferSize, 64);
-//        this.postgresRingBuffer = postgresRingBuffer;
+        this.postgresRingBuffer = new PostgreSqlEntryRecordRingBufferHandler(
+            ringBufferSegment,
+            postgreSQLConfiguration.directCopyBatchRecordsCount()
+        );
         this.workerId = workerId;
         stageTableProcessorsMap = new HashMap<>();
         for (int stageTableIndex = 0; stageTableIndex < postgreSQLConfiguration.stageTablesPerWorkerThreadCount(); stageTableIndex++) {
@@ -64,7 +56,7 @@ public class HotAccountPostgresWorker implements RingBufferProcessor {
             this.stageTableProcessorsMap.put(
                 stageTableIndex,
                 new PostgresRingBufferProcessor(
-                    new EntryRecordDirectPostgresBatchSender(dataSource, tableName),
+                    new EntryRecordDirectPostgresBatchSender(dataSource, tableName, this.postgresRingBuffer),
                     workerId
                 )
             );
@@ -74,9 +66,9 @@ public class HotAccountPostgresWorker implements RingBufferProcessor {
             workerId
         );
         this.workerThread = Thread.ofPlatform()
-            .name("zero-alloc-entry-record-postgres-worker-" + workerId)
+            .name("zero-alloc-entries-snapshot-postgres-worker-" + workerId)
             .priority(Thread.NORM_PRIORITY)
-            .unstarted(this::entryRecordBatchRingBuffer);
+            .unstarted(this::entriesSnapshotBatchRingBuffer);
     }
 
     public void start() {
@@ -95,7 +87,11 @@ public class HotAccountPostgresWorker implements RingBufferProcessor {
         this.postgresArena.close();
     }
 
-    private void entryRecordBatchRingBuffer() {
+    public PostgreSqlEntryRecordRingBufferHandler postgresRingBuffer() {
+        return postgresRingBuffer;
+    }
+
+    private void entriesSnapshotBatchRingBuffer() {
         log.info("Worker {} started processing zero-allocation batches", this.workerThread);
 
         // ✅ Создаем consumer который работает напрямую с off-heap memory
@@ -115,7 +111,7 @@ public class HotAccountPostgresWorker implements RingBufferProcessor {
             try {
                 // ✅ Пытаемся обработать батч БЕЗ copying в heap
                 final PostgresRingBufferProcessor processor = stageTableProcessorsMap.get(stageTableProcessorIndex);
-                final long walSequenceId = ringBufferHandler.tryProcessBatch(processor, readOffset, (long) postgreSQLConfiguration.directCopyBatchRecordsCount() * EntryRecordRingBufferHandler.POSTGRES_ENTRY_RECORD_SIZE);
+                final long walSequenceId = postgresRingBuffer.tryProcessBatch(processor);
 
                 if (walSequenceId > 0) {
 //                    final long walSequenceId = entryRecordBatchRingBuffer.walSequenceId(batchOffset);
@@ -150,20 +146,5 @@ public class HotAccountPostgresWorker implements RingBufferProcessor {
         }
 
         log.info("Worker {} stopped processing batches", workerId);
-    }
-
-
-    public long processOffset() {
-        return this.readOffset;
-    }
-
-    public void processOffset(long offset) {
-        this.readOffset = offset;
-        VarHandle.releaseFence();
-    }
-
-    @Override
-    public int beforeBatchOperationGap() {
-        return POSTGRES_HEADER_SIZE;
     }
 }

@@ -5,18 +5,21 @@ import lombok.experimental.Accessors;
 import lombok.extern.slf4j.Slf4j;
 import org.seleznyov.iyu.kfin.ledger.domain.model.entryrecord.EntryRecord;
 import org.seleznyov.iyu.kfin.ledger.domain.model.entryrecord.EntryType;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.ArenaUuidMap;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.AccountsPartitionHashTable;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.configuration.LedgerConfiguration;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.nio.charset.StandardCharsets;
 import java.time.*;
 import java.time.temporal.ChronoUnit;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.locks.LockSupport;
+
+import static org.seleznyov.iyu.kfin.ledger.domain.model.entryrecord.EntryType.DEBIT;
 
 @Slf4j
 @Data
@@ -24,6 +27,31 @@ import java.util.UUID;
 public class EntryRecordBatchHandler {
 
     private static final long BASE_EPOCH_MILLIS = LocalDateTime.of(2000, 1, 1, 0, 0, 0, 0).toInstant(ZoneOffset.UTC).toEpochMilli();
+
+    private static final VarHandle STAMP_STATUS_MEMORY_BARRIER;
+    private static final VarHandle READ_OFFSET_MEMORY_BARRIER;
+    private static final VarHandle STAMP_OFFSET_MEMORY_BARRIER;
+    private static final VarHandle PASSED_BARRIER_BATCH_AMOUNT_MEMORY_BARRIER;
+    private static final VarHandle PASSED_BARRIER_BATCH_AMOUNT_ACCUMULATOR_MEMORY_BARRIER;
+
+    static {
+        try {
+            MethodHandles.Lookup lookup = MethodHandles.lookup();
+            // Для статических полей
+            STAMP_STATUS_MEMORY_BARRIER = lookup.findVarHandle(
+                EntryRecordBatchHandler.class, "stampStatus", int.class);
+            READ_OFFSET_MEMORY_BARRIER = lookup.findVarHandle(
+                EntryRecordBatchHandler.class, "readOffset", long.class);
+            STAMP_OFFSET_MEMORY_BARRIER = lookup.findVarHandle(
+                EntryRecordBatchHandler.class, "stampOffset", long.class);
+            PASSED_BARRIER_BATCH_AMOUNT_MEMORY_BARRIER = lookup.findVarHandle(
+                EntryRecordBatchHandler.class, "passedBarrierBatchAmount", long.class);
+            PASSED_BARRIER_BATCH_AMOUNT_ACCUMULATOR_MEMORY_BARRIER = lookup.findVarHandle(
+                EntryRecordBatchHandler.class, "passedBarrierBatchAmountAccumulator", long.class);
+        } catch (Exception e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
 
     private final static int CPU_CACHE_LINE_SIZE = 64;
 
@@ -82,28 +110,28 @@ public class EntryRecordBatchHandler {
     private static final int ORDINAL_OFFSET = (int) (ORDINAL_LENGTH_OFFSET + LENGTH_TYPE.byteSize());
     private static final ValueLayout ORDINAL_TYPE = ValueLayout.JAVA_LONG;
 
-    private static final int WAL_SEQUENCE_ID_LENGTH_OFFSET = (int) (ORDINAL_OFFSET + ORDINAL_TYPE.byteSize());
-    public static final int WAL_SEQUENCE_ID_OFFSET = (int) (WAL_SEQUENCE_ID_LENGTH_OFFSET + LENGTH_TYPE.byteSize());
-    private static final ValueLayout WAL_SEQUENCE_ID_TYPE = ValueLayout.JAVA_LONG;
+//    private static final int WAL_SEQUENCE_ID_LENGTH_OFFSET = (int) (ORDINAL_OFFSET + ORDINAL_TYPE.byteSize());
+//    public static final int WAL_SEQUENCE_ID_OFFSET = (int) (WAL_SEQUENCE_ID_LENGTH_OFFSET + LENGTH_TYPE.byteSize());
+//    private static final ValueLayout WAL_SEQUENCE_ID_TYPE = ValueLayout.JAVA_LONG;
 
-    private static final int POSTGRES_ENTRY_RECORD_RAW_SIZE = (int) (WAL_SEQUENCE_ID_OFFSET + WAL_SEQUENCE_ID_TYPE.byteSize());
+    private static final int POSTGRES_ENTRY_RECORD_RAW_SIZE = (int) (ORDINAL_OFFSET + ORDINAL_TYPE.byteSize());
 
     public static final int POSTGRES_ENTRY_RECORD_SIZE = (POSTGRES_ENTRY_RECORD_RAW_SIZE + CPU_CACHE_LINE_SIZE - 1) & -CPU_CACHE_LINE_SIZE;
 
     private final MemorySegment memorySegment;
 //    private final UUID entriesAccountId;
 
-    private final ArenaUuidMap accountsBalanceMap;
-    private final ArenaUuidMap accountsEntriesCountMap;
-    private long walShardSequenceId;
-    private long offset;
+    private final AccountsPartitionHashTable accountsStateTable;
+//    private long walShardSequenceId;
+    private int stampStatus;
+    private long stampOffset;
+    private long readOffset;
     private long arenaSize;
     private long passedBarrierBatchAmount = 0;
     private long passedBarrierBatchAmountAccumulator = 0;
     private long operationsCount = 0;
     private long startEpochMillis = 0;
     private long minutesSinceEpoch = 0;
-    private long entryOrdinal = 0;
     private long actualAccountsCount = 0;
     private volatile long lastAccessTime;
 //    private final MemoryLayout memoryLayout;
@@ -113,15 +141,13 @@ public class EntryRecordBatchHandler {
         long walShardSequenceId,
         LedgerConfiguration ledgerConfiguration
     ) {
-        this.walShardSequenceId = walShardSequenceId;
+//        this.walShardSequenceId = walShardSequenceId;
         this.memorySegment = memorySegment;
         final Arena balancesArena = Arena.ofConfined();
-        this.accountsBalanceMap = new ArenaUuidMap(balancesArena, ledgerConfiguration.hotAccounts().maxCount());
-        this.accountsEntriesCountMap = new ArenaUuidMap(balancesArena, ledgerConfiguration.hotAccounts().maxCount());
+        this.accountsStateTable = new AccountsPartitionHashTable(balancesArena, ledgerConfiguration.hotAccounts().maxCount(), 16);
         this.offset = 0;
         this.arenaSize = memorySegment.byteSize();
         this.lastAccessTime = lastAccessTime;
-        resetOrdinal();
         log.debug("Created PostgresBinaryEntryRecordLayout: segment_size={}KB, record_size={} bytes",
             arenaSize / 1024, POSTGRES_ENTRY_RECORD_SIZE);
 //        this.memoryLayout = MemoryLayout.structLayout(
@@ -135,19 +161,23 @@ public class EntryRecordBatchHandler {
     }
 
     public long totalAmount(UUID accountId) {
-        return accountsBalanceMap.get(accountId);
+        return accountsStateTable.getBalance(accountId);
     }
 
     public void resetTotalAmount(UUID accountId) {
-        accountsBalanceMap.put(accountId, 0);
+        accountsStateTable.putBalance(accountId, 0);
     }
 
     public long entriesCount(UUID accountId) {
-        return accountsEntriesCountMap.get(accountId);
+        return accountsStateTable.getCount(accountId);
     }
 
     public void resetEntriesCount(UUID accountId) {
-        accountsEntriesCountMap.put(accountId, 0);
+        accountsStateTable.putCount(accountId, 0);
+    }
+
+    public long entryOrdinal(UUID accountId) {
+        return accountsStateTable.getOrdinal(accountId);
     }
 
     public long operationsCount() {
@@ -186,15 +216,15 @@ public class EntryRecordBatchHandler {
     public void registerAccount(UUID accountId, long balance) {
         actualAccountsCount++;
         final long offset = actualAccountsCount << 3;
-        accountsBalanceMap.put(accountId, balance);
+        accountsStateTable.putBalance(accountId, balance);
     }
 
     public void accountBalance(UUID accountId, long balance) {
-        accountsBalanceMap.put(accountId, balance);
+        accountsStateTable.putBalance(accountId, balance);
     }
 
     public long accountBalance(UUID accountId) {
-        return accountsBalanceMap.get(accountId);
+        return accountsStateTable.getBalance(accountId);
     }
 
     public long amount() {
@@ -351,33 +381,85 @@ public class EntryRecordBatchHandler {
     }
 
     public boolean stampEntryRecordForwardPassBarrier(EntryRecord entryRecord) {
-        stampEntryRecord(entryRecord);
-        offsetForward();
-        passedBarrierBatchAmountAccumulator += entryRecord.amount();
-        accountsBalanceMap.put(
-            entryRecord.accountId(),
-            accountsBalanceMap.get(entryRecord.accountId()) + entryRecord.amount()
-        );
-        accountsEntriesCountMap.put(
-            entryRecord.accountId(),
-            accountsEntriesCountMap.get(entryRecord.accountId()) + 1
-        );
-        operationsCount++;
-        entryOrdinal++;
-        if (entryOrdinal == Long.MAX_VALUE) {
-            resetOrdinal();
-        }
-        final boolean barrierPassed = offsetBarrierPassed();
-        if (barrierPassed) {
-            resetPassedBarrierBatchAmountAccumulator();
-        }
-        return barrierPassed;
+        int maxAttempts = 100;
+        int spinAttempts = 20;
+        int yieldAttempts = 50;
+        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+            long currentReadOffset = (long) READ_OFFSET_MEMORY_BARRIER.getAcquire(this) % this.arenaSize;
+            long currentStampOffset = (long) STAMP_OFFSET_MEMORY_BARRIER.getAndAdd(this, POSTGRES_ENTRY_RECORD_SIZE) % this.arenaSize;
 
+            if (currentStampOffset > currentReadOffset - POSTGRES_ENTRY_RECORD_SIZE) {
+                if (attempt < spinAttempts) {
+                    Thread.onSpinWait();
+                } else if (attempt < spinAttempts + yieldAttempts) {
+                    Thread.yield();
+                } else {
+                    long parkNanos = 1_000L << Math.min(attempt - spinAttempts - yieldAttempts - yieldAttempts, 16);
+                    LockSupport.parkNanos(parkNanos);
+                }
+                continue;
+            }
+
+            STAMP_STATUS_MEMORY_BARRIER.set(this, MemoryBarrierOperationStatus.HANDLING.memoryOrdinal());
+
+//            operationsCount++;
+            long hashTableOffset = accountsStateTable.getOffset(entryRecord.accountId());
+            if (hashTableOffset == -1) {
+                //TODO вставить новое значение
+                hashTableOffset = accountsStateTable.put(
+                    entryRecord.accountId(),
+                    0,//может быть, стоит загрузить из базы?
+                    0,
+                    0
+                );
+            }
+            long entryOrdinal = accountsStateTable.getOrdinal(hashTableOffset) + 1;
+            long entryBalance = accountsStateTable.getBalance(hashTableOffset);
+            if (DEBIT.equals(entryRecord.entryType()) && entryBalance < entryRecord.amount()) {
+                throw new IllegalStateException("Insufficient balance for debit: " + entryRecord + " (balance=" + entryBalance + ")");
+            }
+
+            VarHandle.storeStoreFence();
+
+            stampEntryRecord(entryRecord);
+
+            if (entryOrdinal == Long.MAX_VALUE) {
+                resetOrdinal(entryRecord.accountId());
+                entryOrdinal = 0;
+            }
+            accountsStateTable.update(
+                hashTableOffset,
+                accountsStateTable.getBalance(hashTableOffset) + entryRecord.amount(),
+                entryOrdinal,
+                accountsStateTable.getCount(hashTableOffset) + 1
+            );
+            final boolean barrierPassed = offsetBarrierPassed();
+            if (barrierPassed) {
+                resetPassedBarrierBatchAmountAccumulator();
+            }
+
+            passedBarrierBatchAmountAccumulator += entryRecord.amount();
+
+            VarHandle.releaseFence();
+
+            STAMP_STATUS_MEMORY_BARRIER.setRelease(this, MemoryBarrierOperationStatus.COMPLETED.memoryOrdinal());
+//            offsetForward();
+//        accountsStateMap.putBalance(
+//            entryRecord.accountId(),
+//            accountsStateMap.getBalance(entryRecord.accountId()) + entryRecord.amount()
+//        );
+//        accountsStateMap.putCount(
+//            entryRecord.accountId(),
+//            accountsStateMap.getCount(entryRecord.accountId()) + 1
+//        );
+            return barrierPassed;
+        }
 //        return barrier;
 //        if (offset + ENTRY_SIZE >= arenaSize) {
 //            return false;
 //        }
 //        offset = offset + ENTRY_SIZE;
+        throw new IllegalStateException("Failed to stamp entry record forward pass barrier");
     }
 
     public void offsetForward() {
@@ -441,9 +523,11 @@ public class EntryRecordBatchHandler {
             entryRecord.currencyCode().length()
         );
 
+        final long entryOrdinal = accountsStateTable().getOrdinal(entryRecord.accountId());
+
         memorySegment.set(ValueLayout.JAVA_LONG, offset + ORDINAL_OFFSET, entryOrdinal);
 
-        memorySegment.set(ValueLayout.JAVA_LONG, offset + WAL_SEQUENCE_ID_OFFSET, walShardSequenceId);
+//        memorySegment.set(ValueLayout.JAVA_LONG, offset + WAL_SEQUENCE_ID_OFFSET, walShardSequenceId);
 
 //        amount(entryRecord.amount());
 //        entryType(entryRecord.entryType());
@@ -462,9 +546,11 @@ public class EntryRecordBatchHandler {
         passedBarrierBatchAmountAccumulator = 0;
     }
 
-    private void resetOrdinal() {
+    private void resetOrdinal(UUID accountId) {
         this.startEpochMillis = LocalDateTime.now().toInstant(ZoneOffset.UTC).toEpochMilli() - BASE_EPOCH_MILLIS;
         this.minutesSinceEpoch = this.startEpochMillis / 60_000;
-        this.entryOrdinal = this.minutesSinceEpoch << 32; //& 0xFFFFFFFFFFF00000L;//| (sequence.get() & 0xFFFFF)
+        final long ordinal = this.minutesSinceEpoch << 32;
+        accountsStateTable.putOrdinal(accountId, ordinal);
+        //this.entryOrdinal = this.minutesSinceEpoch << 32; //& 0xFFFFFFFFFFF00000L;//| (sequence.get() & 0xFFFFF)
     }
 }

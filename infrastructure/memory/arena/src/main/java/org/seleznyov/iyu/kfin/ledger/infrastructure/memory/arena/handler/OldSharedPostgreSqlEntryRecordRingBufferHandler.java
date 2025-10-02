@@ -3,7 +3,7 @@ package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler;
 import lombok.Data;
 import lombok.experimental.Accessors;
 import lombok.extern.slf4j.Slf4j;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.processor.batchprocessor.BatchProcessor;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.prevprocessor.RingBufferProcessor;
 
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.AtomicLong;
 @Slf4j
 @Data
 @Accessors(fluent = true)
-public class SharedPostgreSqlEntryRecordBatchRingBufferHandler implements BatchRingBufferHandler {
+public class OldSharedPostgreSqlEntryRecordRingBufferHandler implements RingBufferHandler {
 
     private static final VarHandle STAMP_MEMORY_BARRIER_STATUS = ValueLayout.JAVA_INT.varHandle();
 
@@ -73,7 +73,7 @@ public class SharedPostgreSqlEntryRecordBatchRingBufferHandler implements BatchR
     private final AtomicLong stampOffset = new AtomicLong(0);
     private final AtomicLong readOffset = new AtomicLong(0);
 
-    public SharedPostgreSqlEntryRecordBatchRingBufferHandler(MemorySegment memorySegment, long maxEntriesPerBatch) {
+    public OldSharedPostgreSqlEntryRecordRingBufferHandler(MemorySegment memorySegment, long maxEntriesPerBatch) {
         this.ringBufferSegment = memorySegment;
 //        this.maxBatches = maxBatches;
         this.arenaSize = memorySegment.byteSize();
@@ -92,7 +92,7 @@ public class SharedPostgreSqlEntryRecordBatchRingBufferHandler implements BatchR
     }
 
     @Override
-    public MemorySegment ringBufferSegment() {
+    public MemorySegment memorySegment() {
         return ringBufferSegment;
     }
 
@@ -150,7 +150,7 @@ public class SharedPostgreSqlEntryRecordBatchRingBufferHandler implements BatchR
 //        return METADATA_SIZE + (batchIndex % maxBatches) * batchSlotSize);
 //    }
     public boolean tryProcessBatch(
-        BatchProcessor batchProcessor
+        RingBufferProcessor ringBufferProcessor
 //        long currentBatchOffset
     ) {
         long currentReadOffset = readOffset.get();
@@ -171,7 +171,7 @@ public class SharedPostgreSqlEntryRecordBatchRingBufferHandler implements BatchR
             long batchSlotOffset = currentReadOffset;//currentBatchOffset;
             long batchSize = batchSize(batchSlotOffset);
             // ✅ Обрабатываем batch
-            final long processed = batchProcessor.processBatch(this, batchSlotOffset, batchSize);
+            final long processed = ringBufferProcessor.process(this, batchSlotOffset, batchSize);
 
             if (processed == batchSize) {
                 // ✅ Очищаем slot для переиспользования

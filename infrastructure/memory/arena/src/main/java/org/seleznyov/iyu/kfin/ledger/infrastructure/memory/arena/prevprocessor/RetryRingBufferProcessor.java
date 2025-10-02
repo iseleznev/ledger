@@ -1,4 +1,4 @@
-package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.processor.batchprocessor;
+package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.prevprocessor;
 
 import lombok.extern.slf4j.Slf4j;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.PostgresBinaryBatchLayout;
@@ -10,14 +10,14 @@ import java.util.UUID;
  * ✅ Retry BatchProcessor - с автоматическими retry при ошибках
  */
 @Slf4j
-public class RetryBatchProcessor implements PostgresBinaryBatchLayout.BatchProcessor {
+public class RetryRingBufferProcessor implements PostgresBinaryBatchLayout.BatchProcessor {
 
     private final PostgresBinaryBatchLayout.BatchProcessor delegate;
     private final int maxRetries;
     private final long retryDelayMs;
 
-    public RetryBatchProcessor(PostgresBinaryBatchLayout.BatchProcessor delegate,
-                               int maxRetries, long retryDelayMs) {
+    public RetryRingBufferProcessor(PostgresBinaryBatchLayout.BatchProcessor delegate,
+                                    int maxRetries, long retryDelayMs) {
         this.delegate = delegate;
         this.maxRetries = maxRetries;
         this.retryDelayMs = retryDelayMs;

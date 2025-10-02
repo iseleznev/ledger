@@ -1,7 +1,7 @@
-package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.processor.batchprocessor;
+package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.prevprocessor;
 
 import lombok.extern.slf4j.Slf4j;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.PostgreSqlEntryRecordBatchRingBufferHandler;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.PostgreSqlEntryRecordRingBufferHandler;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.PostgresBinaryBatchLayout;
 
 import java.lang.foreign.MemorySegment;
@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * ✅ Metrics BatchProcessor - собирает детальную статистику
  */
 @Slf4j
-public class MetricsBatchProcessor implements BatchProcessor {
+public class MetricsRingBufferProcessor implements RingBufferProcessor {
 
     private final PostgresBinaryBatchLayout.BatchProcessor delegate;
 
@@ -22,13 +22,13 @@ public class MetricsBatchProcessor implements BatchProcessor {
     private final AtomicLong successfulBatches = new AtomicLong(0);
     private final AtomicLong failedBatches = new AtomicLong(0);
 
-    public MetricsBatchProcessor(PostgresBinaryBatchLayout.BatchProcessor delegate) {
+    public MetricsRingBufferProcessor(PostgresBinaryBatchLayout.BatchProcessor delegate) {
         this.delegate = delegate;
     }
 
     @Override
-    public boolean processBatch(PostgreSqlEntryRecordBatchRingBufferHandler ringBufferLayout, long batchSlotOffset, long batchRawSize) {
-        final MemorySegment ringBufferSegment = ringBufferLayout.ringBufferSegment();
+    public boolean processBatch(PostgreSqlEntryRecordRingBufferHandler ringBufferLayout, long batchSlotOffset, long batchRawSize) {
+        final MemorySegment ringBufferSegment = ringBufferLayout.memorySegment();
         long startTime = System.nanoTime();
         int entryCount = PostgresBinaryBatchLayout.readEntryCount(ringBufferSegment, batchSlotOffset);
 
