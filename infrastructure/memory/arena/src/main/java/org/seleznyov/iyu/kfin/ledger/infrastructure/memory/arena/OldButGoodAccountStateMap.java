@@ -7,14 +7,14 @@ import java.util.UUID;
 import static java.lang.foreign.ValueLayout.JAVA_INT;
 import static java.lang.foreign.ValueLayout.JAVA_LONG;
 
-public class ArenaUuidMap {
+public class OldButGoodAccountStateMap {
 
     private final Arena arena;
     private int capacity;
     private int mask;
     private MemorySegment memorySegment;
 
-    private static final int MAP_ENTRY_SIZE = 32; // 8 + 8 + 8 + 4 + 4 (msb + lsb + value + state + padding)
+    private static final int MAP_ENTRY_SIZE = 48; // 8 + 8 + 8 + 8 + 8 + 4 + 4 (msb + lsb + balance + ordinal + count + state + padding)
     private static final int EMPTY = 0;
     private static final int OCCUPIED = 1;
     private static final int DELETED = 2;
@@ -22,12 +22,14 @@ public class ArenaUuidMap {
     // Смещения в entry для лучшей читаемости
     private static final int MSB_OFFSET = 0;
     private static final int LSB_OFFSET = 8;
-    private static final int VALUE_OFFSET = 16;
-    private static final int STATE_OFFSET = 24;
+    private static final int BALANCE_OFFSET = 16;
+    private static final int ORDINAL_OFFSET = 24;
+    private static final int COUNT_OFFSET = 32;
+    private static final int STATE_OFFSET = 40;
 
     private int size;
 
-    public ArenaUuidMap(Arena arena, int expectedCapacity) {
+    public OldButGoodAccountStateMap(Arena arena, int expectedCapacity) {
         // Находим ближайшую степень двойки
         this.capacity = nextPowerOfTwo(expectedCapacity * 2);
         this.mask = capacity - 1;
@@ -45,7 +47,7 @@ public class ArenaUuidMap {
         }
     }
 
-    public boolean put(UUID key, long value) {
+    public boolean putBalance(UUID key, long value) {
         if (key == null) {
             throw new IllegalArgumentException("Key cannot be null");
         }
@@ -73,14 +75,14 @@ public class ArenaUuidMap {
                 // Найдена свободная ячейка
                 setEntryMSB(index, msb);
                 setEntryLSB(index, lsb);
-                setEntryValue(index, value);
+                setEntryBalance(index, value);
                 setEntryState(index, OCCUPIED);
                 size++;
                 return true;
             } else if (state == OCCUPIED) {
                 // Проверяем, не тот ли это ключ (update)
                 if (getEntryMSB(index) == msb && getEntryLSB(index) == lsb) {
-                    setEntryValue(index, value); // Обновляем значение
+                    setEntryBalance(index, value); // Обновляем значение
                     return false; // Не добавили новый элемент
                 }
             }
@@ -94,7 +96,154 @@ public class ArenaUuidMap {
 
     }
 
-    public long get(UUID key) {
+    public boolean putOrdinal(UUID key, long value) {
+        if (key == null) {
+            throw new IllegalArgumentException("Key cannot be null");
+        }
+
+        if (size >= capacity * 0.75) {
+            resize(capacity * 2);
+            //throw new IllegalStateException("Hash table is too full, need resize");
+        }
+
+        // Счетчик для предотвращения бесконечного цикла
+
+        long msb = key.getMostSignificantBits();
+        long lsb = key.getLeastSignificantBits();
+        int hashCode = hash(msb, lsb);
+        int index = hashCode & mask;
+
+        // Linear probing для поиска свободной ячейки
+        int probeCount = 0;
+        final int maxProbes = capacity;
+//        while (true) {
+        while (probeCount < maxProbes) {
+            int state = getEntryState(index);
+
+            if (state == EMPTY || state == DELETED) {
+                // Найдена свободная ячейка
+                setEntryMSB(index, msb);
+                setEntryLSB(index, lsb);
+                setEntryOrdinal(index, value);
+                setEntryState(index, OCCUPIED);
+                size++;
+                return true;
+            } else if (state == OCCUPIED) {
+                // Проверяем, не тот ли это ключ (update)
+                if (getEntryMSB(index) == msb && getEntryLSB(index) == lsb) {
+                    setEntryOrdinal(index, value); // Обновляем значение
+                    return false; // Не добавили новый элемент
+                }
+            }
+
+            // Переходим к следующей ячейке (linear probing)
+            index = (index + 1) & mask;
+            probeCount++;
+        }
+
+        throw new IllegalStateException("Unable to find slot after " + maxProbes + " probes");
+
+    }
+
+    public boolean putCount(UUID key, long value) {
+        if (key == null) {
+            throw new IllegalArgumentException("Key cannot be null");
+        }
+
+        if (size >= capacity * 0.75) {
+            resize(capacity * 2);
+            //throw new IllegalStateException("Hash table is too full, need resize");
+        }
+
+        // Счетчик для предотвращения бесконечного цикла
+
+        long msb = key.getMostSignificantBits();
+        long lsb = key.getLeastSignificantBits();
+        int hashCode = hash(msb, lsb);
+        int index = hashCode & mask;
+
+        // Linear probing для поиска свободной ячейки
+        int probeCount = 0;
+        final int maxProbes = capacity;
+//        while (true) {
+        while (probeCount < maxProbes) {
+            int state = getEntryState(index);
+
+            if (state == EMPTY || state == DELETED) {
+                // Найдена свободная ячейка
+                setEntryMSB(index, msb);
+                setEntryLSB(index, lsb);
+                setEntryCount(index, value);
+                setEntryState(index, OCCUPIED);
+                size++;
+                return true;
+            } else if (state == OCCUPIED) {
+                // Проверяем, не тот ли это ключ (update)
+                if (getEntryMSB(index) == msb && getEntryLSB(index) == lsb) {
+                    setEntryCount(index, value); // Обновляем значение
+                    return false; // Не добавили новый элемент
+                }
+            }
+
+            // Переходим к следующей ячейке (linear probing)
+            index = (index + 1) & mask;
+            probeCount++;
+        }
+
+        throw new IllegalStateException("Unable to find slot after " + maxProbes + " probes");
+
+    }
+
+    public boolean put(UUID key, long balance, long ordinal, long count) {
+        if (key == null) {
+            throw new IllegalArgumentException("Key cannot be null");
+        }
+
+        if (size >= capacity * 0.75) {
+            resize(capacity * 2);
+            //throw new IllegalStateException("Hash table is too full, need resize");
+        }
+
+        // Счетчик для предотвращения бесконечного цикла
+
+        long msb = key.getMostSignificantBits();
+        long lsb = key.getLeastSignificantBits();
+        int hashCode = hash(msb, lsb);
+        int index = hashCode & mask;
+
+        // Linear probing для поиска свободной ячейки
+        int probeCount = 0;
+        final int maxProbes = capacity;
+//        while (true) {
+        while (probeCount < maxProbes) {
+            int state = getEntryState(index);
+
+            if (state == EMPTY || state == DELETED) {
+                // Найдена свободная ячейка
+                setEntryMSB(index, msb);
+                setEntryLSB(index, lsb);
+                setEntryValue(index, balance, ordinal, count);
+                setEntryState(index, OCCUPIED);
+                size++;
+                return true;
+            } else if (state == OCCUPIED) {
+                // Проверяем, не тот ли это ключ (update)
+                if (getEntryMSB(index) == msb && getEntryLSB(index) == lsb) {
+                    setEntryValue(index, balance, ordinal, count); // Обновляем значение
+                    return false; // Не добавили новый элемент
+                }
+            }
+
+            // Переходим к следующей ячейке (linear probing)
+            index = (index + 1) & mask;
+            probeCount++;
+        }
+
+        throw new IllegalStateException("Unable to find slot after " + maxProbes + " probes");
+
+    }
+
+    public long getBalance(UUID key) {
         if (key == null) {
             return -1;
         }
@@ -119,7 +268,79 @@ public class ArenaUuidMap {
             if (state == OCCUPIED) {
                 // Сравниваем ключи
                 if (getEntryMSB(index) == msb && getEntryLSB(index) == lsb) {
-                    return getEntryValue(index);
+                    return getEntryBalance(index);
+                }
+            }
+
+            // Продолжаем поиск (deleted ячейки пропускаем)
+            index = (index + 1) & mask;
+            probeCount++;
+        }
+        return -1;
+    }
+
+    public long getOrdinal(UUID key) {
+        if (key == null) {
+            return -1;
+        }
+
+        long msb = key.getMostSignificantBits();
+        long lsb = key.getLeastSignificantBits();
+        int hashCode = hash(msb, lsb);
+        int index = hashCode & mask;
+
+        // Linear probing для поиска
+//        while (true) {
+        int probeCount = 0;
+        final int maxProbes = capacity;
+
+        while (probeCount < maxProbes) {
+            int state = getEntryState(index);
+
+            if (state == EMPTY) {
+                return -1; // Элемент не найден
+            }
+
+            if (state == OCCUPIED) {
+                // Сравниваем ключи
+                if (getEntryMSB(index) == msb && getEntryLSB(index) == lsb) {
+                    return getEntryOrdinal(index);
+                }
+            }
+
+            // Продолжаем поиск (deleted ячейки пропускаем)
+            index = (index + 1) & mask;
+            probeCount++;
+        }
+        return -1;
+    }
+
+    public long getCount(UUID key) {
+        if (key == null) {
+            return -1;
+        }
+
+        long msb = key.getMostSignificantBits();
+        long lsb = key.getLeastSignificantBits();
+        int hashCode = hash(msb, lsb);
+        int index = hashCode & mask;
+
+        // Linear probing для поиска
+//        while (true) {
+        int probeCount = 0;
+        final int maxProbes = capacity;
+
+        while (probeCount < maxProbes) {
+            int state = getEntryState(index);
+
+            if (state == EMPTY) {
+                return -1; // Элемент не найден
+            }
+
+            if (state == OCCUPIED) {
+                // Сравниваем ключи
+                if (getEntryMSB(index) == msb && getEntryLSB(index) == lsb) {
+                    return getEntryCount(index);
                 }
             }
 
@@ -135,8 +356,9 @@ public class ArenaUuidMap {
         long lsb = key.getLeastSignificantBits();
         int hashCode = hash(msb, lsb);
         int index = hashCode & mask;
+        long probesLeft = size;
 
-        while (true) {
+        while (probesLeft > 0) {
             int state = getEntryState(index);
 
             if (state == EMPTY) {
@@ -152,7 +374,9 @@ public class ArenaUuidMap {
             }
 
             index = (index + 1) & mask;
+            probesLeft--;
         }
+        return false;
     }
 
 //    private static int hash(long msb, long lsb) {
@@ -211,29 +435,55 @@ public class ArenaUuidMap {
 
     // Чтение/запись LSB (младшие 64 бита UUID)
     private long getEntryLSB(int index) {
-        return memorySegment.get(JAVA_LONG, entryOffset(index) + 8);
+        return memorySegment.get(JAVA_LONG, entryOffset(index) + LSB_OFFSET);
     }
 
     private void setEntryLSB(int index, long lsb) {
-        memorySegment.set(JAVA_LONG, entryOffset(index) + 8, lsb);
+        memorySegment.set(JAVA_LONG, entryOffset(index) + LSB_OFFSET, lsb);
     }
 
     // Чтение/запись значения (индекс в массиве)
     private long getEntryValue(int index) {
-        return memorySegment.get(JAVA_LONG, entryOffset(index) + 16);
+        return memorySegment.get(JAVA_LONG, entryOffset(index) + BALANCE_OFFSET);
     }
 
-    private void setEntryValue(int index, long value) {
-        memorySegment.set(JAVA_LONG, entryOffset(index) + 16, value);
+    private void setEntryValue(int index, long balance, long ordinal, long count) {
+        memorySegment.set(JAVA_LONG, entryOffset(index) + BALANCE_OFFSET, balance);
+        memorySegment.set(JAVA_LONG, entryOffset(index) + ORDINAL_OFFSET, ordinal);
+        memorySegment.set(JAVA_LONG, entryOffset(index) + COUNT_OFFSET, count);
+    }
+
+    private long getEntryBalance(int index) {
+        return memorySegment.get(JAVA_LONG, entryOffset(index) + BALANCE_OFFSET);
+    }
+
+    private void setEntryBalance(int index, long value) {
+        memorySegment.set(JAVA_LONG, entryOffset(index) + BALANCE_OFFSET, value);
+    }
+
+    private long getEntryOrdinal(int index) {
+        return memorySegment.get(JAVA_LONG, entryOffset(index) + ORDINAL_OFFSET);
+    }
+
+    private void setEntryOrdinal(int index, long value) {
+        memorySegment.set(JAVA_LONG, entryOffset(index) + ORDINAL_OFFSET, value);
+    }
+
+    private long getEntryCount(int index) {
+        return memorySegment.get(JAVA_LONG, entryOffset(index) + COUNT_OFFSET);
+    }
+
+    private void setEntryCount(int index, long value) {
+        memorySegment.set(JAVA_LONG, entryOffset(index) + COUNT_OFFSET, value);
     }
 
     // Чтение/запись состояния
     private int getEntryState(int index) {
-        return memorySegment.get(JAVA_INT, entryOffset(index) + 24);
+        return memorySegment.get(JAVA_INT, entryOffset(index) + STATE_OFFSET);
     }
 
     private void setEntryState(int index, int state) {
-        memorySegment.set(JAVA_INT, entryOffset(index) + 24, state);
+        memorySegment.set(JAVA_INT, entryOffset(index) + STATE_OFFSET, state);
     }
 
     private static int nextPowerOfTwo(int n) {
@@ -325,24 +575,30 @@ public class ArenaUuidMap {
                     (long) oldIndex * MAP_ENTRY_SIZE + MSB_OFFSET);
                 long lsb = oldMemory.get(JAVA_LONG,
                     (long) oldIndex * MAP_ENTRY_SIZE + LSB_OFFSET);
-                long value = oldMemory.get(JAVA_LONG,
-                    (long) oldIndex * MAP_ENTRY_SIZE + VALUE_OFFSET);
+                long balance = oldMemory.get(JAVA_LONG,
+                    (long) oldIndex * MAP_ENTRY_SIZE + BALANCE_OFFSET);
+                long ordinal = oldMemory.get(JAVA_LONG,
+                    (long) oldIndex * MAP_ENTRY_SIZE + ORDINAL_OFFSET);
+                long count = oldMemory.get(JAVA_LONG,
+                    (long) oldIndex * MAP_ENTRY_SIZE + COUNT_OFFSET);
 
                 // Вставляем в новую таблицу
-                rehashSingleEntry(msb, lsb, value);
+                rehashSingleEntry(msb, lsb, balance, ordinal, count);
             }
         }
     }
 
-    private void setEntry(int index, long msb, long lsb, long value, int state) {
+    private void setEntry(int index, long msb, long lsb, long balance, long ordinal, long count, int state) {
         long offset = entryOffset(index);
         memorySegment.set(JAVA_LONG, offset + MSB_OFFSET, msb);
         memorySegment.set(JAVA_LONG, offset + LSB_OFFSET, lsb);
-        memorySegment.set(JAVA_LONG, offset + VALUE_OFFSET, value);
+        memorySegment.set(JAVA_LONG, offset + BALANCE_OFFSET, balance);
+        memorySegment.set(JAVA_LONG, offset + ORDINAL_OFFSET, ordinal);
+        memorySegment.set(JAVA_LONG, offset + COUNT_OFFSET, count);
         memorySegment.set(JAVA_INT, offset + STATE_OFFSET, state);
     }
 
-    private void rehashSingleEntry(long msb, long lsb, long value) {
+    private void rehashSingleEntry(long msb, long lsb, long value, long ordinal, long count) {
         int hashCode = hash(msb, lsb);
         int index = hashCode & mask;
 
@@ -351,7 +607,7 @@ public class ArenaUuidMap {
             int state = getEntryState(index);
 
             if (state == EMPTY) {
-                setEntry(index, msb, lsb, value, OCCUPIED);
+                setEntry(index, msb, lsb, value, ordinal, count, OCCUPIED);
                 size++;
                 return;
             }

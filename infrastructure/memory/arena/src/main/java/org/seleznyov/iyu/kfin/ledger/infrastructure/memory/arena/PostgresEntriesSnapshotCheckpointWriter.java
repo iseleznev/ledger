@@ -2,7 +2,6 @@ package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena;
 
 import com.sun.nio.file.ExtendedOpenOption;
 import lombok.extern.slf4j.Slf4j;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.configuration.WalConfiguration;
 
 import java.io.IOException;
 import java.lang.foreign.ValueLayout;
@@ -14,7 +13,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.concurrent.atomic.AtomicLong;
 
 @Slf4j
-public class PostgresCheckpointWriter {
+public class PostgresEntriesSnapshotCheckpointWriter {
 
     private final static int CPU_CACHE_LINE_SIZE = 64;
 
@@ -57,7 +56,7 @@ public class PostgresCheckpointWriter {
     private FileChannel checkpointFileChannel;
     private volatile boolean isOpen = false;
 
-    public PostgresCheckpointWriter(String path, int shardId) {
+    public PostgresEntriesSnapshotCheckpointWriter(String path, int shardId) {
         this.shardId = shardId;
 
 
@@ -84,7 +83,7 @@ public class PostgresCheckpointWriter {
     }
 
     private String newCheckpointFilename(String newFilename) {
-        return newFilename + "_pg_sequence_id.dat";
+        return newFilename + "_pg_entries_snapshots_sequence_id.dat";
     }
 
     public void writeCheckpoint(long walSequenceId) {

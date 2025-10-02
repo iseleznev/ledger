@@ -35,14 +35,14 @@ public class HotAccountEntryRecordWorker {
 
     //    private final UUID accountId;
     private final EntriesSnapshotSharedBatchHandler snapshotSharedBatchHandler;
-    private final PostgreSqlEntriesSnapshotBatchRingBufferHandler snapshotBatchRingBufferHandler;
+    private final PostgreSqlEntriesSnapshotRingBufferHandler snapshotBatchRingBufferHandler;
 
     // === MEMORY MANAGEMENT ===
 
     //    private final Arena accountArena;
     private final EntryRecordBatchHandler entryRecordBatchHandler;
     private final HotAccountPostgresWorkersManager postgresWorkersManager;
-    private final WalEntryRecordBatchRingBufferHandler walEntryRecordBatchRingBufferHandler;
+    private final WalEntryRecordRingBufferHandler walEntryRecordBatchRingBufferHandler;
 //    private final WalEntryRecordBatchRingBufferHandler walEntryRecordBatchRingBufferHandler;
 //    private final MemorySegment amountArraySegment;
 
@@ -78,6 +78,8 @@ public class HotAccountEntryRecordWorker {
     private final AtomicLong totalProcessingErrors = new AtomicLong(0);
     private final Arena batchArena;
 
+    private final long[] stampResult = new long[2];
+
     // === CONSTRUCTOR ===
 
     public HotAccountEntryRecordWorker(
@@ -88,8 +90,8 @@ public class HotAccountEntryRecordWorker {
 //        ExecutorService shardDedicatedExecutorService,
         HotAccountPostgresWorkersManager postgresWorkersManager,
         EntriesSnapshotSharedBatchHandler snapshotSharedBatchHandler,
-        PostgreSqlEntriesSnapshotBatchRingBufferHandler snapshotBatchRingBufferHandler,
-        WalEntryRecordBatchRingBufferHandler walEntryRecordBatchRingBufferHandler
+        PostgreSqlEntriesSnapshotRingBufferHandler snapshotBatchRingBufferHandler,
+        WalEntryRecordRingBufferHandler walEntryRecordBatchRingBufferHandler
     ) {
 //        this.accountId = configuration.accountId();
 
@@ -295,7 +297,7 @@ public class HotAccountEntryRecordWorker {
             currentBalance,
             operationDay,
             entryRecordBatchHandler.entryRecordId(),
-            entryRecordBatchHandler.entryOrdinal(),
+            entryRecordBatchHandler.entryOrdinal(accountId),
             lastSnapshot
         );
         entryRecordBatchHandler.resetOperationsCount();
@@ -341,17 +343,6 @@ public class HotAccountEntryRecordWorker {
 //            long totalDelta = calculateCurrentBatchDelta();
             final long entriesOffset = entryRecordBatchHandler.offset();
             final long arenaHalfSize = entryRecordBatchHandler.arenaSize() >> 1;
-            final boolean pgBarrierPassed = postgresWorkersManager.nextRingBufferHandler().stampBatchForwardPassBarrier(
-//                accountId,
-                entryRecordBatchHandler,
-                entriesOffset < arenaHalfSize
-                    ? arenaHalfSize
-                    : 0,
-                (int) (entriesOffset < arenaHalfSize
-                    ? (entryRecordBatchHandler.arenaSize() - arenaHalfSize) / EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE
-                    : arenaHalfSize / EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE),
-                entryRecordBatchHandler.passedBarrierBatchAmount()
-            );
             final boolean walBarrierPassed = walEntryRecordBatchRingBufferHandler.stampBatchForwardPassBarrier(
 
 /*
@@ -362,7 +353,7 @@ public class HotAccountEntryRecordWorker {
         long totalAmount
 
  */
-                entryRecordBatchHandler.walShardSequenceId(),
+//                entryRecordBatchHandler.walShardSequenceId(),
 //                accountId,
                 entryRecordBatchHandler,
 //                entriesOffset < arenaHalfSize
@@ -372,11 +363,26 @@ public class HotAccountEntryRecordWorker {
 //                    ? (entryRecordBatchHandler.arenaSize() - arenaHalfSize) / EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE
 //                    : arenaHalfSize / EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE),
                 entryRecordBatchHandler.passedBarrierOffset(),
-                entryRecordBatchHandler.barrierPassedEntriesCount()
+                entryRecordBatchHandler.barrierPassedEntriesCount(),
+                stampResult
 //                entryRecordBatchHandler.passedBarrierBatchAmount()
             );
-            final long walSequenceId = walEntryRecordBatchRingBufferHandler.nextWalSequenceId();
-            entryRecordBatchHandler.walShardSequenceId(walSequenceId);
+            final long walSequenceId = stampResult[1];
+
+            final boolean pgBarrierPassed = postgresWorkersManager.nextRingBufferHandler().stampBatchForwardPassBarrier(
+//                accountId,
+                walSequenceId,
+                entryRecordBatchHandler,
+                entriesOffset < arenaHalfSize
+                    ? arenaHalfSize
+                    : 0,
+                (int) (entriesOffset < arenaHalfSize
+                    ? (entryRecordBatchHandler.arenaSize() - arenaHalfSize) / EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE
+                    : arenaHalfSize / EntryRecordBatchHandler.POSTGRES_ENTRY_RECORD_SIZE),
+                entryRecordBatchHandler.passedBarrierBatchAmount()
+            );
+//            final long walSequenceId = walEntryRecordBatchRingBufferHandler.nextWalSequenceId();
+//            entryRecordBatchHandler.walShardSequenceId(walSequenceId);
             // Send напрямую в shared ring buffer БЕЗ промежуточных objects
 
 //            if (sent) {

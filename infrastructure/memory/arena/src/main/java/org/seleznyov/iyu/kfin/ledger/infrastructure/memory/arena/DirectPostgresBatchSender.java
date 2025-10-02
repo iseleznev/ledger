@@ -5,8 +5,10 @@ import org.postgresql.PGConnection;
 import org.postgresql.copy.CopyIn;
 import org.postgresql.copy.CopyOperation;
 import org.postgresql.core.QueryExecutor;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.BatchRingBufferHandler;
+import org.seleznyov.iyu.kfin.ledger.domain.model.entryrecord.EntryRecord;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.RingBufferHandler;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.EntryRecordBatchHandler;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.EntryRecordRingBufferHandler;
 
 import javax.sql.DataSource;
 import java.io.IOException;
@@ -15,14 +17,13 @@ import java.lang.foreign.MemorySegment;
 import java.lang.reflect.Method;
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * ✅ Максимально быстрая отправка PostgreSQL binary data через QueryExecutor.sendCopyData()
  * Минимизирует copying и использует прямой доступ к PostgreSQL protocol
  */
 @Slf4j
-public abstract class DirectPostgresBatchSender<T extends BatchRingBufferHandler> {
+public abstract class DirectPostgresBatchSender<T extends RingBufferHandler> {
 
     protected final DataSource dataSource;
 
@@ -49,14 +50,14 @@ public abstract class DirectPostgresBatchSender<T extends BatchRingBufferHandler
 //    protected final AtomicLong totalSendTime = new AtomicLong(0);
 //    protected final AtomicLong totalErrors = new AtomicLong(0);
     protected final long[] sentResults = new long[RESULTS_ARRAY_LENGTH];
-    protected final T ringBufferHandler;
+//    protected final T ringBufferHandler;
 
     public DirectPostgresBatchSender(
-        DataSource dataSource,
-        T ringBufferHandler
+        DataSource dataSource
+//        T ringBufferHandler
     ) {
         this.dataSource = dataSource;
-        this.ringBufferHandler = ringBufferHandler;
+//        this.ringBufferHandler = ringBufferHandler;
 //        log.info("Created DirectQueryExecutorSender with chunk_size={}KB", OPTIMAL_CHUNK_SIZE / 1024);
         log.info("Created DirectQueryExecutorSender with chunk_size={}KB", OPTIMAL_CHUNK_SIZE >> 10);
     }
@@ -64,7 +65,7 @@ public abstract class DirectPostgresBatchSender<T extends BatchRingBufferHandler
     /**
      * ✅ Максимально быстрая отправка через QueryExecutor.sendCopyData()
      */
-    public long sendDirectly(long batchSlotOffset, long batchRawSize) {
+    public long sendDirectly(RingBufferHandler<EntryRecord> ringBufferHandler, long batchSlotOffset, byte[] reusableChunk, long batchRawSize) {
 
         long startTime = System.nanoTime();
 
@@ -79,7 +80,7 @@ public abstract class DirectPostgresBatchSender<T extends BatchRingBufferHandler
             final CopyIn copyIn = (CopyIn) copyOperation;
 
             // ✅ Отправляем данные оптимальными chunk'ами через sendCopyData
-            copyIteratively(copyIn, batchSlotOffset, batchRawSize, sentResults);
+            copyIteratively(ringBufferHandler, copyIn, batchSlotOffset, batchRawSize, reusableChunk, sentResults);
             copyIn.flushCopy();
 
             // Завершаем COPY
@@ -146,13 +147,13 @@ public abstract class DirectPostgresBatchSender<T extends BatchRingBufferHandler
     /**
      * ✅ Ключевой метод - отправка через sendCopyData БЕЗ stream'ов
      */
-    private void copyIteratively(CopyIn copyIn, long batchSlotOffset, long batchRawSize, long[] results) throws SQLException {
+    private void copyIteratively(RingBufferHandler<EntryRecord> ringBufferHandler, CopyIn copyIn, long batchSlotOffset, long batchRawSize, byte[] reusableChunk, long[] results) throws SQLException {
 
-        long totalSize = ringBufferHandler.ringBufferSegment().byteSize();
+        long totalSize = ringBufferHandler.memorySegment().byteSize();
         long sent = 0;
 
         // ✅ Переиспользуемый buffer - создается один раз
-        byte[] reusableChunk = new byte[(int) batchRawSize];
+//        byte[] reusableChunk = new byte[(int) batchRawSize];
         long entriesCount = 0;
 
         log.debug("Starting to send {} bytes in chunks of {}KB", totalSize, OPTIMAL_CHUNK_SIZE / 1024);
@@ -165,7 +166,7 @@ public abstract class DirectPostgresBatchSender<T extends BatchRingBufferHandler
 
             // ✅ Bulk copy из MemorySegment в reusable array (единственное copying)
             //TODO: переделать на отправку по батчам, ведь у каждого батча есть заголовок
-            copyMemorySegmentToArray(ringBufferHandler.ringBufferSegment(), batchSlotOffset + sent, reusableChunk, currentChunkSize);
+            copyMemorySegmentToArray(ringBufferHandler.memorySegment(), batchSlotOffset + sent, reusableChunk, currentChunkSize);
 
             // ✅ Прямая отправка через network БЕЗ промежуточных stream'ов
             copyIn.writeToCopy(reusableChunk, 0, currentChunkSize);

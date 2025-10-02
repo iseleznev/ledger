@@ -1,4 +1,4 @@
-package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.processor.batchprocessor;
+package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.prevprocessor;
 
 import lombok.extern.slf4j.Slf4j;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.PostgresBinaryBatchLayout;
@@ -12,11 +12,11 @@ import java.util.UUID;
  * ✅ Validation BatchProcessor - проверяет данные перед обработкой
  */
 @Slf4j
-public class ValidationBatchProcessor implements PostgresBinaryBatchLayout.BatchProcessor {
+public class ValidationRingBufferProcessor implements PostgresBinaryBatchLayout.BatchProcessor {
 
     private final PostgresBinaryBatchLayout.BatchProcessor delegate;
 
-    public ValidationBatchProcessor(PostgresBinaryBatchLayout.BatchProcessor delegate) {
+    public ValidationRingBufferProcessor(PostgresBinaryBatchLayout.BatchProcessor delegate) {
         this.delegate = delegate;
     }
 

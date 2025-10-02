@@ -1,22 +1,23 @@
 package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena;
 
 import lombok.extern.slf4j.Slf4j;
+import org.seleznyov.iyu.kfin.ledger.domain.model.entryrecord.EntryRecord;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.configuration.PostgreSQLConfiguration;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.configuration.WalConfiguration;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.EntryRecordBatchHandler;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.EntryRecordRingBufferHandler;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.prevprocessor.PostgresRingBufferProcessor;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.prevprocessor.PostgresEntryRecordRingBufferProcessor;
 
 import javax.sql.DataSource;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.invoke.VarHandle;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.locks.LockSupport;
 
 @Slf4j
-public class HotAccountPostgresWorker implements RingBufferProcessor {
+public class PostgresRingBufferProcessor implements RingBufferProcessor<EntryRecord> {
 
     static final String STAGE_TABLE_NAME_PREFIX = "stage_entry_records";
 
@@ -26,7 +27,7 @@ public class HotAccountPostgresWorker implements RingBufferProcessor {
     private static final int POSTGRES_HEADER_SIZE = 19;
 
     //    private final EntryRecordRingBufferHandler postgresRingBuffer;
-    private final Map<Integer, PostgresRingBufferProcessor> stageTableProcessorsMap;
+    private final List<PostgresEntryRecordRingBufferProcessor> stageTableProcessors;
     private final PostgresEntryRecordCheckpointWriter checkpointWriter;
     private final PostgreSQLConfiguration postgreSQLConfiguration;
     private final Arena postgresArena;
@@ -38,7 +39,7 @@ public class HotAccountPostgresWorker implements RingBufferProcessor {
     private final EntryRecordRingBufferHandler ringBufferHandler;
     private long readOffset = 0;
 
-    public HotAccountPostgresWorker(
+    public PostgresRingBufferProcessor(
 //        EntryRecordRingBufferHandler postgresRingBuffer,
         int workerId,
         DataSource dataSource,
@@ -58,12 +59,11 @@ public class HotAccountPostgresWorker implements RingBufferProcessor {
         MemorySegment ringBufferSegment = postgresArena.allocate(ringBufferSize, 64);
 //        this.postgresRingBuffer = postgresRingBuffer;
         this.workerId = workerId;
-        stageTableProcessorsMap = new HashMap<>();
+        stageTableProcessors = new ArrayList<>();
         for (int stageTableIndex = 0; stageTableIndex < postgreSQLConfiguration.stageTablesPerWorkerThreadCount(); stageTableIndex++) {
             final String tableName = STAGE_TABLE_NAME_PREFIX + "_w" + workerId + "t" + stageTableIndex;
-            this.stageTableProcessorsMap.put(
-                stageTableIndex,
-                new PostgresRingBufferProcessor(
+            this.stageTableProcessors.add(
+                new org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.prevprocessor.PostgresRingBufferProcessor(
                     new EntryRecordDirectPostgresBatchSender(dataSource, tableName),
                     workerId
                 )
@@ -105,16 +105,16 @@ public class HotAccountPostgresWorker implements RingBufferProcessor {
 //                return processOffHeapBatch(ringSegment, batchOffset, workerId);
 //            };
 
-        final long parkNanos = postgreSQLConfiguration.waitingEmptyRingBufferNanos();
+//        final long parkNanos = postgreSQLConfiguration.waitingEmptyRingBufferNanos();
         final int retries = postgreSQLConfiguration.emptyIterationsYieldRetries();
-        final int stageTableProcessorsCount = stageTableProcessorsMap.size();//postgreSQLConfiguration.stageTablesPerWorkerThreadCount();
+        final int stageTableProcessorsCount = stageTableProcessors.size();//postgreSQLConfiguration.stageTablesPerWorkerThreadCount();
 
         long emptyIterations = 0;
 
-        while (isRunning) {
+//        while (isRunning) {
             try {
                 // ✅ Пытаемся обработать батч БЕЗ copying в heap
-                final PostgresRingBufferProcessor processor = stageTableProcessorsMap.get(stageTableProcessorIndex);
+                final org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.prevprocessor.PostgresRingBufferProcessor processor = stageTableProcessors.get(stageTableProcessorIndex);
                 final long walSequenceId = ringBufferHandler.tryProcessBatch(processor, readOffset, (long) postgreSQLConfiguration.directCopyBatchRecordsCount() * EntryRecordRingBufferHandler.POSTGRES_ENTRY_RECORD_SIZE);
 
                 if (walSequenceId > 0) {
@@ -147,7 +147,7 @@ public class HotAccountPostgresWorker implements RingBufferProcessor {
                 // Пауза при ошибке чтобы не спамить
                 LockSupport.parkNanos(10_000_000L); // 10ms
             }
-        }
+
 
         log.info("Worker {} stopped processing batches", workerId);
     }

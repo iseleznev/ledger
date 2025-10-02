@@ -5,7 +5,7 @@ import org.postgresql.PGConnection;
 import org.postgresql.copy.CopyIn;
 import org.postgresql.copy.CopyOperation;
 import org.postgresql.core.QueryExecutor;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.BatchRingBufferHandler;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.RingBufferHandler;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.EntryRecordBatchHandler;
 
 import javax.sql.DataSource;
@@ -57,7 +57,7 @@ public class CommonRecordDirectPostgresBatchSender {
     /**
      * ✅ Максимально быстрая отправка через QueryExecutor.sendCopyData()
      */
-    public long sendDirectly(BatchRingBufferHandler ringBufferLayout, long batchSlotOffset, long batchRawSize) {
+    public long sendDirectly(RingBufferHandler ringBufferLayout, long batchSlotOffset, long batchRawSize) {
 
         long startTime = System.nanoTime();
 
@@ -139,9 +139,9 @@ public class CommonRecordDirectPostgresBatchSender {
     /**
      * ✅ Ключевой метод - отправка через sendCopyData БЕЗ stream'ов
      */
-    private void copyIteratively(CopyIn copyIn, BatchRingBufferHandler ringBufferLayout, long batchSlotOffset, long batchRawSize, long[] results) throws SQLException {
+    private void copyIteratively(CopyIn copyIn, RingBufferHandler ringBufferLayout, long batchSlotOffset, long batchRawSize, long[] results) throws SQLException {
 
-        long totalSize = ringBufferLayout.ringBufferSegment().byteSize();
+        long totalSize = ringBufferLayout.memorySegment().byteSize();
         long sent = 0;
 
         // ✅ Переиспользуемый buffer - создается один раз
@@ -158,7 +158,7 @@ public class CommonRecordDirectPostgresBatchSender {
 
             // ✅ Bulk copy из MemorySegment в reusable array (единственное copying)
             //TODO: переделать на отправку по батчам, ведь у каждого батча есть заголовок
-            copyMemorySegmentToArray(ringBufferLayout.ringBufferSegment(), batchSlotOffset + sent, reusableChunk, currentChunkSize);
+            copyMemorySegmentToArray(ringBufferLayout.memorySegment(), batchSlotOffset + sent, reusableChunk, currentChunkSize);
 
             // ✅ Прямая отправка через network БЕЗ промежуточных stream'ов
             copyIn.writeToCopy(reusableChunk, 0, currentChunkSize);

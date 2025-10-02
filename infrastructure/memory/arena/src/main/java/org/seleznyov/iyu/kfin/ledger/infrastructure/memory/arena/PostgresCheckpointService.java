@@ -1,7 +1,7 @@
 package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena;
 
 import lombok.extern.slf4j.Slf4j;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.BatchRingBufferHandler;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.RingBufferHandler;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -40,7 +40,7 @@ public class PostgresCheckpointService {
      */
     public void updateCheckpoint(
         int shardId,
-        BatchRingBufferHandler handler,
+        RingBufferHandler handler,
         long batchOffset
     ) {
         try {

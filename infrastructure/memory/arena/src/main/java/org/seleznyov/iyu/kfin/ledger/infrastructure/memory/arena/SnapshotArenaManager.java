@@ -4,7 +4,7 @@ import lombok.Data;
 import lombok.experimental.Accessors;
 import lombok.extern.slf4j.Slf4j;
 import org.seleznyov.iyu.kfin.ledger.domain.model.snapshot.EntriesSnapshot;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.PostgreSqlEntriesSnapshotBatchRingBufferHandler;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.PostgreSqlEntriesSnapshotRingBufferHandler;
 
 import java.util.UUID;
 
@@ -16,7 +16,7 @@ import java.util.UUID;
 public class SnapshotArenaManager {
 
     private final UUID accountId;
-    private final PostgreSqlEntriesSnapshotBatchRingBufferHandler snapshotBatch;
+    private final PostgreSqlEntriesSnapshotRingBufferHandler snapshotBatch;
 
     // Snapshot triggers configuration
     private final long timeBasedIntervalMs;
@@ -29,7 +29,7 @@ public class SnapshotArenaManager {
 
     public SnapshotArenaManager(
         UUID accountId,
-        PostgreSqlEntriesSnapshotBatchRingBufferHandler ringBufferHandler,
+        PostgreSqlEntriesSnapshotRingBufferHandler ringBufferHandler,
         long timeBasedIntervalMs,
         int countBasedThreshold
     ) {

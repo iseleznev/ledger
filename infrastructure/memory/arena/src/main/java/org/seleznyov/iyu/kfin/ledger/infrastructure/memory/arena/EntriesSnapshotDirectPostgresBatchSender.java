@@ -1,7 +1,7 @@
 package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena;
 
 import lombok.extern.slf4j.Slf4j;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.PostgreSqlEntriesSnapshotBatchRingBufferHandler;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.PostgreSqlEntriesSnapshotRingBufferHandler;
 
 import javax.sql.DataSource;
 
@@ -10,7 +10,7 @@ import javax.sql.DataSource;
  * Минимизирует copying и использует прямой доступ к PostgreSQL protocol
  */
 @Slf4j
-public class EntriesSnapshotDirectPostgresBatchSender extends DirectPostgresBatchSender<PostgreSqlEntriesSnapshotBatchRingBufferHandler> {
+public class EntriesSnapshotDirectPostgresBatchSender extends DirectPostgresBatchSender<PostgreSqlEntriesSnapshotRingBufferHandler> {
 
     private static final String COPY_SQL = """
         COPY ledger.account_snapshots
@@ -19,7 +19,7 @@ public class EntriesSnapshotDirectPostgresBatchSender extends DirectPostgresBatc
         FROM STDIN WITH (FORMAT BINARY)
         """;
 
-    public EntriesSnapshotDirectPostgresBatchSender(DataSource dataSource, PostgreSqlEntriesSnapshotBatchRingBufferHandler ringBufferHandler) {
+    public EntriesSnapshotDirectPostgresBatchSender(DataSource dataSource, PostgreSqlEntriesSnapshotRingBufferHandler ringBufferHandler) {
         super(dataSource, ringBufferHandler);
     }
 

@@ -1,7 +1,11 @@
-package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.processor.batchprocessor;
+package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.prevprocessor.batchprocessor;
 
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.DirectPostgresBatchSender;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.PostgresBinaryBatchLayout;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.prevprocessor.LoggingRingBufferProcessor;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.prevprocessor.MetricsRingBufferProcessor;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.prevprocessor.RetryRingBufferProcessor;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.prevprocessor.ValidationRingBufferProcessor;
 
 /**
  * ✅ Дополнительные реализации BatchProcessor для различных сценариев
@@ -19,16 +23,16 @@ import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.Postgre
 
         // Добавляем validation
         PostgresBinaryBatchLayout.BatchProcessor validatingProcessor =
-            new ValidationBatchProcessor(baseProcessor);
+            new ValidationRingBufferProcessor(baseProcessor);
 
         // Добавляем retry
         PostgresBinaryBatchLayout.BatchProcessor retryingProcessor =
-            new RetryBatchProcessor(validatingProcessor, 3, 100);
+            new RetryRingBufferProcessor(validatingProcessor, 3, 100);
 
         // Добавляем metrics
         PostgresBinaryBatchLayout.BatchProcessor metricsProcessor =
-            new MetricsBatchProcessor(retryingProcessor);
+            new MetricsRingBufferProcessor(retryingProcessor);
 
         // Добавляем logging для важных операций
-        return new LoggingBatchProcessor(metricsProcessor);
+        return new LoggingRingBufferProcessor(metricsProcessor);
     }

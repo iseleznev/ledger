@@ -1,7 +1,7 @@
-package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.processor.batchprocessor;
+package org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.prevprocessor;
 
 import lombok.extern.slf4j.Slf4j;
-import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.BatchRingBufferHandler;
+import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.RingBufferHandler;
 import org.seleznyov.iyu.kfin.ledger.infrastructure.memory.arena.handler.PostgresBinaryBatchLayout;
 
 import java.lang.foreign.MemorySegment;
@@ -12,19 +12,19 @@ import java.util.concurrent.atomic.AtomicLong;
  * ✅ Logging BatchProcessor - для debug и мониторинга
  */
 @Slf4j
-public class LoggingBatchProcessor implements BatchProcessor {
+public class LoggingRingBufferProcessor implements RingBufferProcessor {
 
-    private final BatchProcessor delegate;
+    private final RingBufferProcessor delegate;
     private final AtomicLong processedBatches = new AtomicLong(0);
     private final AtomicLong processedEntries = new AtomicLong(0);
 
-    public LoggingBatchProcessor(BatchProcessor delegate) {
+    public LoggingRingBufferProcessor(RingBufferProcessor delegate) {
         this.delegate = delegate;
     }
 
     @Override
-    public boolean processBatch(BatchRingBufferHandler ringBufferHandler, long batchSlotOffset, long batchRawSize) {
-        final MemorySegment ringBufferSegment = ringBufferHandler.ringBufferSegment();
+    public boolean process(RingBufferHandler ringBufferHandler, long batchSlotOffset, long batchRawSize) {
+        final MemorySegment ringBufferSegment = ringBufferHandler.memorySegment();
         long startTime = System.nanoTime();
 
         // Читаем metadata для логирования
@@ -36,7 +36,7 @@ public class LoggingBatchProcessor implements BatchProcessor {
             accountId, entryCount, totalDelta);
 
         // Делегируем обработку
-        boolean success = delegate.processBatch(ringBufferSegment, batchSlotOffset);
+        boolean success = delegate.process(ringBufferSegment, batchSlotOffset);
 
         long processingTime = System.nanoTime() - startTime;
 
