@@ -1,0 +1,22 @@
+package org.seleznyov.iyu.kfin.ledgerservice.core.model;
+
+public enum EntryType {
+    DEBIT,
+    CREDIT;
+
+    public static EntryType ofShort(short ordinalValue) {
+        if (ordinalValue < 0) {
+            return DEBIT;
+        } else {
+            return CREDIT;
+        }
+    }
+
+    public short shortFromEntryType() {
+        if (DEBIT.equals(this)) {
+            return -1;
+        } else {
+            return 1;
+        }
+    }
+}
