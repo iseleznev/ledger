@@ -4,9 +4,16 @@ import java.lang.foreign.MemorySegment;
 
 public interface PipelineRingBufferProcessor {
 
-    long processOffset();
-
     int beforeBatchOperationGap();
 
-    long process(MemorySegment memorySegment, long processOffset, long expectedProcessSize, long walSequenceId, long stateSequenceId);
+    long pipelineProcessOffset();
+
+    long process(
+        MemorySegment memorySegment,
+        long arenaSize,
+        long stampOffset,
+        int processSize,
+        long walSequenceId,
+        long stateSequenceId
+    );
 }

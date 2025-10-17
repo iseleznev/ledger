@@ -6,7 +6,9 @@ public record RingBufferConfiguration(
     TransferRequestRingBufferConfiguration transferRequests,
     PartitionAmountRingBufferConfiguration partitionAmounts,
     InterPartitionAmountRingBufferConfiguration interPartitions,
-    ActorTransferRingBufferConfiguration actorTransfers
+    ActorTransferRingBufferConfiguration actorTransfers,
+    SnapshotRingBufferConfiguration snapshot,
+    WalRingBufferConfiguration wal
 ) {
 
 }

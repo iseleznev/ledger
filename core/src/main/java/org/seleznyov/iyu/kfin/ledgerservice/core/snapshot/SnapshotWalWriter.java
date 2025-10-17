@@ -1,4 +1,4 @@
-package org.seleznyov.iyu.kfin.ledgerservice.core.wal;
+package org.seleznyov.iyu.kfin.ledgerservice.core.snapshot;
 
 import com.sun.nio.file.ExtendedOpenOption;
 import org.seleznyov.iyu.kfin.ledgerservice.core.configuration.properties.LedgerConfiguration;
@@ -19,9 +19,9 @@ import java.time.format.DateTimeFormatter;
 import static org.seleznyov.iyu.kfin.ledgerservice.core.constants.CommonConstants.CPU_CACHE_LINE_SIZE;
 import static org.seleznyov.iyu.kfin.ledgerservice.core.constants.EntryRecordOffsetConstants.POSTGRES_ENTRY_RECORD_SIZE;
 
-public class WalWriter {
+public class SnapshotWalWriter {
 
-    private static final Logger log = LoggerFactory.getLogger(WalWriter.class);
+    private static final Logger log = LoggerFactory.getLogger(SnapshotWalWriter.class);
 
 //    private static final VarHandle WAL_SEQUENCE_ID_VAR_HANDLE;
 //    private static final VarHandle WAL_FILE_OFFSET_VAR_HANDLE;
@@ -38,7 +38,7 @@ public class WalWriter {
 //        }
 //    }
 
-    private static final long WAL_MAGIC_PREFIX = 0x4C4447522D57414CL;//"LDGR-WAL""
+    private static final long WAL_MAGIC_PREFIX = 0x4C4447525368574CL; // "LDGRSNWL"
 
     private static final long WAL_MAGIC_PREFIX_OFFSET = 0;
     private static final ValueLayout.OfLong WAL_MAGIC_TYPE = ValueLayout.JAVA_LONG;
@@ -79,7 +79,7 @@ public class WalWriter {
 
 //    private long sequenceId = 0;
 
-    public WalWriter(
+    public SnapshotWalWriter(
         LedgerConfiguration ledgerConfiguration,
         int partitionNumber,
         long walFileOffset
@@ -130,11 +130,11 @@ public class WalWriter {
     }
 
     private String newWalFilename(String newFilename) {
-        return newFilename + ".wal";
+        return newFilename + "_snapshot.wal";
     }
 
     private String newCheckpointFilename(String newFilename) {
-        return newFilename + "_checkpoint.dat";
+        return newFilename + "_snapshot_checkpoint.dat";
     }
 
     private void closeFileChannel() {

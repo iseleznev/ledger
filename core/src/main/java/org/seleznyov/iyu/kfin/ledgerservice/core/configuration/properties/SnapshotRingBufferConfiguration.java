@@ -1,7 +1,7 @@
 package org.seleznyov.iyu.kfin.ledgerservice.core.configuration.properties;
 
-public record WalRingBufferConfiguration(
-    long entriesCount,
+public record SnapshotRingBufferConfiguration(
+    long snapshotsCount,
     int writeAttempts,
     int writeSpinAttempts,
     int writeYieldAttempts,
