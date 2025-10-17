@@ -10,24 +10,18 @@ import java.util.concurrent.locks.LockSupport;
 
 import static org.seleznyov.iyu.kfin.ledgerservice.core.constants.EntryRecordOffsetConstants.POSTGRES_ENTRY_RECORD_SIZE;
 
-public class SWSRRingBufferHandler {
+public class SimpleSWSRRingBufferHandler {
 
     private static final VarHandle STAMP_OFFSET_VAR_HANDLE;
     private static final VarHandle PROCESS_OFFSET_VAR_HANDLE;
-    private static final VarHandle WAL_SEQUENCE_ID_VAR_HANDLE;
-    private static final VarHandle SNAPSHOT_SEQUENCE_ID_VAR_HANDLE;
 
     static {
         try {
             MethodHandles.Lookup lookup = MethodHandles.lookup();
             STAMP_OFFSET_VAR_HANDLE = lookup.findVarHandle(
-                SWSRRingBufferHandler.class, "stampOffset", long.class);
+                SimpleSWSRRingBufferHandler.class, "stampOffset", long.class);
             PROCESS_OFFSET_VAR_HANDLE = lookup.findVarHandle(
-                SWSRRingBufferHandler.class, "processOffset", long.class);
-            WAL_SEQUENCE_ID_VAR_HANDLE = lookup.findVarHandle(
-                SWSRRingBufferHandler.class, "walSequenceId", long.class);
-            SNAPSHOT_SEQUENCE_ID_VAR_HANDLE = lookup.findVarHandle(
-                SWSRRingBufferHandler.class, "snapshotSequenceId", long.class);
+                SimpleSWSRRingBufferHandler.class, "processOffset", long.class);
         } catch (Exception e) {
             throw new ExceptionInInitializerError(e);
         }
@@ -36,32 +30,22 @@ public class SWSRRingBufferHandler {
     private final MemorySegment memorySegment;
     private final long arenaSize;
     private final long halfArenaSize;
-    private final boolean walSequenceIdNeeded;
-    private final boolean snapshotSequenceIdNeeded;
 
     private long stampOffset;
     private long processOffset;
-    private long walSequenceId;
-    private long snapshotSequenceId;
 
-    public SWSRRingBufferHandler(
-        MemorySegment memorySegment,
-        boolean walSequenceIdNeeded,
-        boolean snapshotSequenceIdNeeded
-    ) {
+    public SimpleSWSRRingBufferHandler(MemorySegment memorySegment) {
         this.memorySegment = memorySegment;
         this.arenaSize = memorySegment.byteSize();
         this.halfArenaSize = this.arenaSize >> 1;
         this.stampOffset = 0;
         this.processOffset = 0;
-        this.walSequenceIdNeeded = walSequenceIdNeeded;
-        this.snapshotSequenceIdNeeded = snapshotSequenceIdNeeded;
     }
 
     /**
      * Single writer - fence'ы достаточно, CAS не нужен
      */
-    public boolean tryStampForward(RingBufferStamper ringBufferStamper, long walSequenceId, long snapshotSequenceId, int maxAttempts) {
+    public boolean tryStampForward(RingBufferStamper ringBufferStamper, int maxAttempts) {
         long recordSize = ringBufferStamper.stampRecordSize();
         if (recordSize <= 0) {
             recordSize = arenaSize;
@@ -101,23 +85,7 @@ public class SWSRRingBufferHandler {
                 continue;
             }
 
-            ringBufferStamper.stamp(memorySegment, currentProcessOffset, availableSize, walSequenceId, snapshotSequenceId);
-            if (walSequenceIdNeeded
-                && currentProcessOffset >= this.halfArenaSize
-                && nextStampOffset <= this.halfArenaSize
-                && availableSize > 0
-            ) {
-                final long bufferStartSequenceId = (long) WAL_SEQUENCE_ID_VAR_HANDLE.get(this);
-                final long bufferStartEntriesAhead = nextStampOffset / POSTGRES_ENTRY_RECORD_SIZE;
-                if (bufferStartSequenceId < bufferStartEntriesAhead) {
-                    throw new IllegalStateException("Buffer start wal sequence id is less than entries count in the buffer for buffer start sequence id = " + bufferStartSequenceId + ", entries count ahead = " + bufferStartEntriesAhead);
-                }
-                WAL_SEQUENCE_ID_VAR_HANDLE.set(this, walSequenceId - bufferStartEntriesAhead);
-            }
-
-            if (snapshotSequenceIdNeeded) {
-                SNAPSHOT_SEQUENCE_ID_VAR_HANDLE.set(this, snapshotSequenceId);
-            }
+            ringBufferStamper.stamp(memorySegment, currentProcessOffset, availableSize, 0, 0);
             STAMP_OFFSET_VAR_HANDLE.setRelease(this, nextStampOffset);
 
             return true;
@@ -132,12 +100,6 @@ public class SWSRRingBufferHandler {
     public long tryProcess(RingBufferProcessor processor, int expectedSize, int recordSize) {
         final long currentStampOffset = (long) STAMP_OFFSET_VAR_HANDLE.getAcquire(this);
         final long currentProcessOffset = (long) PROCESS_OFFSET_VAR_HANDLE.get(this);
-        final long stateSequenceId = this.snapshotSequenceIdNeeded
-            ? (long) SNAPSHOT_SEQUENCE_ID_VAR_HANDLE.get(this)
-            : 0;
-        final long walSequenceId = this.walSequenceIdNeeded
-            ? (long) WAL_SEQUENCE_ID_VAR_HANDLE.get(this)
-            : 0;
 
         long availableSize;
         if (currentProcessOffset > currentStampOffset) {
@@ -160,7 +122,7 @@ public class SWSRRingBufferHandler {
             return availableSize;
         }
 
-        final long processedSize = processor.process(memorySegment, currentProcessOffset, availableSize, walSequenceId, stateSequenceId);
+        final long processedSize = processor.process(memorySegment, currentProcessOffset, availableSize, 0, 0);
 
         final long nextProcessOffset = (currentProcessOffset + processedSize) % arenaSize;
 

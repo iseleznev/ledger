@@ -8,5 +8,5 @@ public interface RingBufferProcessor {
 
     int beforeBatchOperationGap();
 
-    long process(MemorySegment memorySegment, long processOffset, long expectedProcessSize);
+    long process(MemorySegment memorySegment, long processOffset, long processSize, long walSequenceId, long stateSequenceId);
 }

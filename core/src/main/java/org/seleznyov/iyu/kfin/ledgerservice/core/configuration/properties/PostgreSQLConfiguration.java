@@ -4,7 +4,7 @@ public record PostgreSQLConfiguration(
     int workerThreadsCount,
     int stageTablesPerWorkerThreadCount,
     int copyThreadsCount,
-    int directCopyRecordsCount,
+    int batchRecordsCount,
     long waitingEmptyRingBufferNanos,
     int emptyIterationsYieldRetries,
     String url,

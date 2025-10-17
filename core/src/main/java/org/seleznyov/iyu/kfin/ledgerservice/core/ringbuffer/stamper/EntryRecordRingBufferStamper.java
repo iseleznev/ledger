@@ -10,6 +10,7 @@ import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 
+import static org.seleznyov.iyu.kfin.ledgerservice.core.constants.CommonConstants.LENGTH_TYPE;
 import static org.seleznyov.iyu.kfin.ledgerservice.core.constants.EntryRecordOffsetConstants.*;
 import static org.seleznyov.iyu.kfin.ledgerservice.core.constants.TransferRequestOffsetConstants.*;
 import static org.seleznyov.iyu.kfin.ledgerservice.core.model.EntryType.CREDIT;
@@ -33,7 +34,10 @@ public class EntryRecordRingBufferStamper implements RingBufferStamper {
     }
 
     @Override
-    public void stamp(MemorySegment memorySegment, long stampOffset) {
+    public void stamp(MemorySegment memorySegment, long stampOffset, long availableSize, long walSequenceId, long stateSequenceId) {
+        if (availableSize < POSTGRES_ENTRY_RECORD_SIZE) {
+            throw new IllegalArgumentException("Not enough space in ring buffer to stamp entry record");
+        }
         stampEntryRecord(
             memorySegment,
             stampOffset,

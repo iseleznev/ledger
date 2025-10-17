@@ -3,12 +3,11 @@ package org.seleznyov.iyu.kfin.ledgerservice.core.constants;
 import java.lang.foreign.ValueLayout;
 
 import static org.seleznyov.iyu.kfin.ledgerservice.core.constants.CommonConstants.CPU_CACHE_LINE_SIZE;
+import static org.seleznyov.iyu.kfin.ledgerservice.core.constants.CommonConstants.LENGTH_TYPE;
 
 public interface EntryRecordOffsetConstants {
     int FIELD_COUNT_OFFSET = 0;
     ValueLayout FIELD_COUNT_TYPE = ValueLayout.JAVA_SHORT;
-
-    ValueLayout.OfShort LENGTH_TYPE = ValueLayout.JAVA_SHORT;
 
     int AMOUNT_LENGTH_OFFSET = (int) (FIELD_COUNT_OFFSET + FIELD_COUNT_TYPE.byteSize());
 

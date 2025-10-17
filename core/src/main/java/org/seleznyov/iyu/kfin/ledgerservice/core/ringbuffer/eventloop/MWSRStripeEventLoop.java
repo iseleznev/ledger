@@ -1,5 +1,6 @@
-package org.seleznyov.iyu.kfin.ledgerservice.core.ringbuffer.handler;
+package org.seleznyov.iyu.kfin.ledgerservice.core.ringbuffer.eventloop;
 
+import org.seleznyov.iyu.kfin.ledgerservice.core.ringbuffer.handler.MWSRRingBufferHandler;
 import org.seleznyov.iyu.kfin.ledgerservice.core.ringbuffer.processor.RingBufferProcessor;
 
 import java.lang.invoke.MethodHandles;
@@ -10,7 +11,7 @@ import java.util.concurrent.locks.LockSupport;
  * Event loop for MWSR (Multiple Writer Single Reader) ring buffer using Memory Segment approach.
  * Minimal GC pressure design - no allocations in hot path.
  */
-public class MWSREventLoop implements Runnable {
+public class MWSRStripeEventLoop implements Runnable {
 
     private static final VarHandle RUNNING_VAR_HANDLE;
 
@@ -18,14 +19,14 @@ public class MWSREventLoop implements Runnable {
         try {
             MethodHandles.Lookup lookup = MethodHandles.lookup();
             RUNNING_VAR_HANDLE = lookup.findVarHandle(
-                MWSREventLoop.class, "running", boolean.class);
+                MWSRStripeEventLoop.class, "running", boolean.class);
         } catch (Exception e) {
             throw new ExceptionInInitializerError(e);
         }
     }
 
     private final MWSRRingBufferHandler ringBuffer;
-    private final RingBufferProcessor processor;
+    private final RingBufferProcessor[] processorStripe;
     private final long expectedBatchSize;
     private final long recordSize;
     private final int maxIdleSpins;
@@ -33,16 +34,16 @@ public class MWSREventLoop implements Runnable {
 
     private boolean running;
 
-    public MWSREventLoop(
+    public MWSRStripeEventLoop(
         MWSRRingBufferHandler ringBuffer,
-        RingBufferProcessor processor,
+        RingBufferProcessor[] processorStripe,
         long expectedBatchSize,
         long recordSize,
         int maxIdleSpins,
         long parkNanos
     ) {
         this.ringBuffer = ringBuffer;
-        this.processor = processor;
+        this.processorStripe = processorStripe;
         this.expectedBatchSize = expectedBatchSize;
         this.recordSize = recordSize;
         this.maxIdleSpins = maxIdleSpins;
@@ -55,15 +56,20 @@ public class MWSREventLoop implements Runnable {
         RUNNING_VAR_HANDLE.setRelease(this, true);
         
         int idleSpins = 0;
+        int stripeIndex = 0;
         
         while ((boolean) RUNNING_VAR_HANDLE.getAcquire(this)) {
-            long processed = ringBuffer.tryProcess(processor, expectedBatchSize, recordSize);
+            long processed = ringBuffer.tryProcess(processorStripe[stripeIndex], expectedBatchSize, recordSize);
             
             if (processed > 0) {
                 idleSpins = 0;
             } else {
                 idleSpins++;
                 handleIdle(idleSpins);
+            }
+            stripeIndex++;
+            if (stripeIndex >= processorStripe.length) {
+                stripeIndex = 0;
             }
         }
     }

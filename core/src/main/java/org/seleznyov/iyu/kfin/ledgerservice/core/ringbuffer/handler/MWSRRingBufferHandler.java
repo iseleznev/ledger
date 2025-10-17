@@ -97,7 +97,7 @@ public class MWSRRingBufferHandler {
 
             // Успешно захватили слот - пишем данные
             try {
-                stamper.stamp(memorySegment, currentStampOffset);
+                stamper.stamp(memorySegment, currentStampOffset, availableSize, 0, 0);
                 VarHandle.releaseFence();
                 return true;
             } catch (Exception e) {
@@ -110,46 +110,6 @@ public class MWSRRingBufferHandler {
         return false;
     }
 
-    public long readyToProcess(int expectedSize, int recordSize) {
-//        VarHandle.acquireFence();
-        final long currentStampOffset = (long) STAMP_OFFSET_VAR_HANDLE.getAcquire(this);
-        final long currentProcessOffset = (long) PROCESS_OFFSET_VAR_HANDLE.get(this);
-
-        long availableSize;
-        if (currentProcessOffset > currentStampOffset) {
-            availableSize = currentProcessOffset < this.halfArenaSize
-                ? this.halfArenaSize - currentProcessOffset
-                : this.arenaSize - currentProcessOffset;
-        } else if (currentStampOffset > currentProcessOffset) {
-            availableSize = currentStampOffset - currentProcessOffset;
-        } else {
-            availableSize = 0;
-        }
-        if (availableSize < recordSize) {
-            availableSize = 0;
-        }
-        if (availableSize > expectedSize) {
-            availableSize = expectedSize;
-        }
-
-        if (availableSize <= 0) {
-            return availableSize;
-        }
-
-        return currentStampOffset > currentProcessOffset && currentStampOffset - currentProcessOffset < expectedSize
-            ? currentStampOffset - currentProcessOffset
-            : expectedSize;
-    }
-
-    public long processedForward(long processedSize) {
-        final long nextProcessOffset = ((long)PROCESS_OFFSET_VAR_HANDLE.get(this) + processedSize) % arenaSize;
-        PROCESS_OFFSET_VAR_HANDLE.setRelease(this, nextProcessOffset);
-        return nextProcessOffset;
-    }
-
-    /**
-     * Single reader - fence'ы достаточно для readOffset
-     */
     public long tryProcess(RingBufferProcessor processor, long expectedSize, long recordSize) {
 //        VarHandle.acquireFence();
         final long currentStampOffset = (long) STAMP_OFFSET_VAR_HANDLE.getAcquire(this);
@@ -176,7 +136,7 @@ public class MWSRRingBufferHandler {
             return availableSize;
         }
 
-        final long processedSize = processor.process(memorySegment, currentProcessOffset, availableSize);
+        final long processedSize = processor.process(memorySegment, currentProcessOffset, availableSize, 0, 0);
 
         final long nextProcessOffset = (currentProcessOffset + processedSize) % arenaSize;
         PROCESS_OFFSET_VAR_HANDLE.setRelease(this, nextProcessOffset);
